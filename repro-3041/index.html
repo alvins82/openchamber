@@ -1,0 +1,64 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>OpenChamber #3041 — composer input surface</title>
+  </head>
+  <body>
+    <h1>OpenChamber #3041 repro — OS voice dictation input surface</h1>
+    <p>
+      The chat prompt box uses a CodeMirror editor; notes/todos/plans/terminal
+      use native &lt;textarea&gt;/&lt;input&gt; elements. OS-level dictation
+      (Windows Voice access, macOS Voice Control/dictation) types into the
+      focused native editable element, which is exactly the difference shown
+      below.
+    </p>
+
+    <section>
+      <h2>Chat prompt box (CodeMirror — ComposerEditor)</h2>
+      <div id="composer"></div>
+    </section>
+
+    <section>
+      <h2>Notes / todos / plans (native &lt;textarea&gt;)</h2>
+      <textarea id="native" rows="3" cols="60"></textarea>
+    </section>
+
+    <pre id="report">loading…</pre>
+
+    <script src="./codemirror.bundle.js"></script>
+    <script>
+      window.__bundle = window.mount;
+    </script>
+    <script type="module">
+      import { mount } from './editor-bundle.mjs';
+      const view = mount(document.getElementById('composer'));
+      const cm = view.contentDOM;
+      const native = document.getElementById('native');
+      const report = {
+        composer: {
+          // The actual focused, editable element of the composer.
+          tagName: cm.tagName.toLowerCase(),
+          isContentEditable: cm.isContentEditable,
+          contentEditableAttr: cm.getAttribute('contenteditable'),
+          isNativeFormControl: cm instanceof HTMLTextAreaElement || cm instanceof HTMLInputElement,
+          // Native text inputs expose value; CodeMirror exposes a contenteditable div.
+          hasValueProperty: typeof cm.value !== 'undefined',
+          role: cm.getAttribute('role') || null,
+          ariaLabel: cm.getAttribute('aria-label') || null,
+          // CodeMirror paints its own caret and replaces document content
+          // programmatically; OS dictation injects text via beforeinput/input
+          // events on a native control, which is where the two diverge.
+          spellcheck: cm.getAttribute('spellcheck'),
+        },
+        nativeTextarea: {
+          tagName: native.tagName.toLowerCase(),
+          isContentEditable: native.isContentEditable,
+          isNativeFormControl: native instanceof HTMLTextAreaElement || native instanceof HTMLInputElement,
+          hasValueProperty: typeof native.value !== 'undefined',
+        },
+      };
+      document.getElementById('report').textContent = JSON.stringify(report, null, 2);
+    </script>
+  </body>
+</html>
