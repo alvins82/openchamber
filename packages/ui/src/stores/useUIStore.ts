@@ -1069,7 +1069,7 @@ export const useUIStore = create<UIStore>()(
         workStatusPanelVisible: false,
         workStatusPanelFits: false,
         workStatusOverlayOpen: false,
-        workStatusHiddenSections: [],
+        workStatusHiddenSections: ['telemetry'],
         isSessionSwitcherOpen: false,
         isSessionDropdownOpen: false,
         pendingDiffFile: null,

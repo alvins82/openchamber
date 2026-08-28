@@ -12,7 +12,7 @@ import {
 } from './telemetry';
 
 // SAFETY: Mock factory helper for unit testing telemetry calculations with partial message payload shapes
-const createMessage = (id: string, role: 'user' | 'assistant', time: { created?: number; completed?: number; ttftMs?: number }, tokens?: { input?: number; output?: number; reasoning?: number; cache?: { read?: number; write?: number } }, cost?: number): Message => {
+const createMessage = (id: string, role: 'user' | 'assistant', time: { created?: number; completed?: number }, tokens?: { input?: number; output?: number; reasoning?: number; cache?: { read?: number; write?: number } }, cost?: number): Message => {
   // SAFETY: Typed mock message for test assertions
   return {
     id,

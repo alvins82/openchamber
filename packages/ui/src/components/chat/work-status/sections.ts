@@ -77,8 +77,12 @@ export const getWorkStatusPanelPresentation = ({
   showEmptyState: contentMounted && allSectionsHidden,
 });
 
+export const WORK_STATUS_DEFAULT_HIDDEN_SECTIONS = [
+  'telemetry',
+] as const satisfies readonly WorkStatusSectionId[];
+
 export const sanitizeWorkStatusHiddenSections = (value: unknown): WorkStatusSectionId[] => {
-  if (!Array.isArray(value)) return [];
+  if (!Array.isArray(value)) return [...WORK_STATUS_DEFAULT_HIDDEN_SECTIONS];
   const seen = new Set<WorkStatusSectionId>();
   for (const entry of value) {
     if (isWorkStatusSectionId(entry)) seen.add(entry);

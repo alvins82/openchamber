@@ -1,6 +1,7 @@
 import React from 'react';
 import { useI18n } from '@/lib/i18n';
-import { useSessionMessageRecords } from '@/sync/sync-context';
+import { useSessionMessageRecords, useSessionStatus } from '@/sync/sync-context';
+import { useUIStore } from '@/stores/useUIStore';
 import {
   WorkStatusCollapsibleSection,
   WorkStatusRow,
@@ -12,6 +13,7 @@ import {
   formatTelemetryTokens,
   formatThroughputRate,
   getLatestCompletedTurnStats,
+  type CompletedTurnStats,
 } from './telemetry';
 
 type Props = {
@@ -22,15 +24,38 @@ type Props = {
 export const WorkStatusTelemetrySection: React.FC<Props> = ({ sessionId, directory }) => {
   const { t } = useI18n();
 
+  const storedExpanded = useUIStore(
+    React.useCallback((state) => state.workStatusExpandedSections['telemetry'], []),
+  );
+  const expanded = storedExpanded ?? false;
+
+  const sessionStatus = useSessionStatus(sessionId ?? '', directory ?? undefined);
+  const isIdle = !sessionStatus || sessionStatus.type === 'idle';
+
   const records = useSessionMessageRecords(
     sessionId ?? '',
     directory ?? undefined,
+    { enabled: expanded },
   );
 
+  const lastStatsRef = React.useRef<CompletedTurnStats | null>(null);
+  const lastSessionIdRef = React.useRef<string | null>(sessionId);
+
+  if (lastSessionIdRef.current !== sessionId) {
+    lastSessionIdRef.current = sessionId;
+    lastStatsRef.current = null;
+  }
+
   const stats = React.useMemo(() => {
-    if (!sessionId || !records || records.length === 0) return null;
-    return getLatestCompletedTurnStats(records);
-  }, [sessionId, records]);
+    if (!sessionId) return null;
+    if (isIdle) {
+      if (!records || records.length === 0) return null;
+      const computed = getLatestCompletedTurnStats(records);
+      lastStatsRef.current = computed;
+      return computed;
+    }
+    return lastStatsRef.current;
+  }, [sessionId, records, isIdle]);
 
   useReportWorkStatusPresence('telemetry', stats !== null);
 
@@ -43,6 +68,8 @@ export const WorkStatusTelemetrySection: React.FC<Props> = ({ sessionId, directo
     avgTtftMs,
     tokensPerSecond,
     inputTokens,
+    outputTokens,
+    reasoningTokens,
     totalGeneratedTokens,
     cacheHitPercent,
     cost,
@@ -52,13 +79,17 @@ export const WorkStatusTelemetrySection: React.FC<Props> = ({ sessionId, directo
     ? `${formatThroughputRate(tokensPerSecond)} · ${formatTelemetryDuration(totalLlmDurationMs)}`
     : formatTelemetryDuration(totalLlmDurationMs);
 
+  const tokensOutLabel = reasoningTokens > 0
+    ? `${formatTelemetryTokens(totalGeneratedTokens)} out+reasoning`
+    : `${formatTelemetryTokens(outputTokens)} out`;
+
   return (
     <WorkStatusCollapsibleSection
       id="telemetry"
       title={t('chat.workStatus.section.telemetry')}
       icon="bar-chart-2"
       summary={headerSummary}
-      defaultExpanded
+      defaultExpanded={false}
     >
       {tokensPerSecond !== null ? (
         <WorkStatusRow
@@ -76,7 +107,7 @@ export const WorkStatusTelemetrySection: React.FC<Props> = ({ sessionId, directo
 
       {totalToolDurationMs > 0 ? (
         <WorkStatusRow
-          icon="command-code"
+          icon="command"
           label={t('chat.workStatus.telemetry.toolDuration')}
           value={<WorkStatusValue>{formatTelemetryDuration(totalToolDurationMs)}</WorkStatusValue>}
         />
@@ -104,7 +135,7 @@ export const WorkStatusTelemetrySection: React.FC<Props> = ({ sessionId, directo
           label={t('chat.workStatus.telemetry.tokens')}
           value={(
             <WorkStatusValue>
-              {`${formatTelemetryTokens(inputTokens)} in · ${formatTelemetryTokens(totalGeneratedTokens)} out`}
+              {`${formatTelemetryTokens(inputTokens)} in · ${tokensOutLabel}`}
             </WorkStatusValue>
           )}
         />

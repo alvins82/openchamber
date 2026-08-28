@@ -35,44 +35,6 @@ export type CompletedTurnStats = {
   cost: number | null;
 };
 
-type MessageTimeLike = {
-  created?: number;
-  completed?: number;
-  ttftMs?: number;
-};
-
-type ToolPartLike = {
-  type: string;
-  state?: {
-    time?: {
-      start?: number;
-      end?: number;
-    };
-  };
-};
-
-type TextPartLike = {
-  type: string;
-  time?: {
-    start?: number;
-  };
-  state?: {
-    time?: {
-      start?: number;
-    };
-  };
-};
-
-type TokenBreakdownLike = {
-  input?: number;
-  output?: number;
-  reasoning?: number;
-  cache?: {
-    read?: number;
-    write?: number;
-  };
-};
-
 /**
  * Merge an array of [start, end] time intervals into a disjoint union of intervals.
  * Correctly accounts for parallel / overlapping tool executions without double-counting.
@@ -153,26 +115,21 @@ export function calculateCompletedStepStats(record: SessionMessageRecord): Compl
   const { info, parts } = record;
   if (info.role !== 'assistant') return null;
 
-  // SAFETY: Message time object with optional completed timestamp
-  const messageTime = info.time as MessageTimeLike | undefined;
-  const created = messageTime?.created;
-  const completed = messageTime?.completed;
+  const { created } = info.time;
+  const completed = info.time.completed;
 
-  if (created === undefined || completed === undefined || !Number.isFinite(created) || !Number.isFinite(completed) || completed < created) {
+  if (completed === undefined || !Number.isFinite(created) || !Number.isFinite(completed) || completed < created) {
     return null;
   }
 
   const totalDurationMs = completed - created;
 
-  // Collect tool intervals
+  // Collect tool intervals from completed tool states
   const rawToolIntervals: Array<[number, number]> = [];
   for (const part of parts) {
-    if (part?.type === 'tool') {
-      // SAFETY: Tool parts have optional nested state and time start/end timestamps
-      const toolPart = part as ToolPartLike;
-      const start = toolPart.state?.time?.start;
-      const end = toolPart.state?.time?.end;
-      if (start !== undefined && end !== undefined && Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+    if (part.type === 'tool' && part.state.status === 'completed') {
+      const { start, end } = part.state.time;
+      if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
         rawToolIntervals.push([start, end]);
       }
     }
@@ -182,23 +139,16 @@ export function calculateCompletedStepStats(record: SessionMessageRecord): Compl
   const toolDurationMs = sumIntervalsDuration(mergedToolIntervals);
   const adjustedLlmDurationMs = Math.max(0, totalDurationMs - toolDurationMs);
 
-  // Measure TTFT
+  // Measure TTFT from first text or reasoning part start timestamp
   let ttftMs: number | null = null;
-  const explicitTtft = messageTime?.ttftMs;
-  if (explicitTtft !== undefined && Number.isFinite(explicitTtft) && explicitTtft > 0 && explicitTtft <= totalDurationMs) {
-    ttftMs = explicitTtft;
-  } else {
-    for (const part of parts) {
-      if (part && (part.type === 'text' || part.type === 'reasoning')) {
-        // SAFETY: Text and reasoning parts carry start timestamps in either time or state.time
-        const textPart = part as TextPartLike;
-        const partStart = textPart.time?.start ?? textPart.state?.time?.start;
-        if (partStart !== undefined && Number.isFinite(partStart) && partStart >= created && partStart <= completed) {
-          const delta = partStart - created;
-          if (delta >= 0 && delta <= totalDurationMs) {
-            ttftMs = delta;
-            break;
-          }
+  for (const part of parts) {
+    if (part.type === 'text' || part.type === 'reasoning') {
+      const partStart = part.time?.start;
+      if (partStart !== undefined && Number.isFinite(partStart) && partStart >= created && partStart <= completed) {
+        const delta = partStart - created;
+        if (delta >= 0 && delta <= totalDurationMs) {
+          ttftMs = delta;
+          break;
         }
       }
     }
@@ -212,13 +162,11 @@ export function calculateCompletedStepStats(record: SessionMessageRecord): Compl
   let cacheWriteTokens = 0;
 
   if (info.tokens) {
-    // SAFETY: Message tokens breakdown from provider
-    const tokenBreakdown = info.tokens as TokenBreakdownLike;
-    inputTokens = sanitizeTokenCount(tokenBreakdown.input);
-    outputTokens = sanitizeTokenCount(tokenBreakdown.output);
-    reasoningTokens = sanitizeTokenCount(tokenBreakdown.reasoning);
-    cacheReadTokens = sanitizeTokenCount(tokenBreakdown.cache?.read);
-    cacheWriteTokens = sanitizeTokenCount(tokenBreakdown.cache?.write);
+    inputTokens = sanitizeTokenCount(info.tokens.input);
+    outputTokens = sanitizeTokenCount(info.tokens.output);
+    reasoningTokens = sanitizeTokenCount(info.tokens.reasoning);
+    cacheReadTokens = sanitizeTokenCount(info.tokens.cache?.read);
+    cacheWriteTokens = sanitizeTokenCount(info.tokens.cache?.write);
   }
 
   const cost = info.cost !== undefined && Number.isFinite(info.cost) && info.cost > 0
@@ -261,12 +209,12 @@ export function getLatestCompletedTurnStats(
   let lastCompletedAssistantIdx = -1;
   for (let i = records.length - 1; i >= 0; i -= 1) {
     const record = records[i];
-    // SAFETY: Message time timestamps
-    const messageTime = record.info.time as MessageTimeLike | undefined;
-    const completed = messageTime?.completed;
-    if (record.info.role === 'assistant' && completed !== undefined && Number.isFinite(completed)) {
-      lastCompletedAssistantIdx = i;
-      break;
+    if (record.info.role === 'assistant') {
+      const completed = record.info.time.completed;
+      if (completed !== undefined && Number.isFinite(completed)) {
+        lastCompletedAssistantIdx = i;
+        break;
+      }
     }
   }
 
