@@ -8,6 +8,7 @@ import type { DraftStarterRef } from '@/lib/draftStarters';
 import { DEFAULT_MONO_FONT, DEFAULT_UI_FONT, type MonoFontOption, type UiFontOption } from '@/lib/fontOptions';
 import { getStoredMobileKeyboardMode, type MobileKeyboardMode } from '@/lib/mobileKeyboardMode';
 import type { TerminalShell } from '@/lib/api/types';
+import type { ProjectRef } from '@/lib/projectContextApi';
 import { useFilesViewTabsStore } from './useFilesViewTabsStore';
 import { isWindowsArm64 } from '@/lib/platform';
 import { isVSCodeRuntime } from '@/lib/desktop';
@@ -24,6 +25,16 @@ export type WeekStartPreference = 'auto' | 'sunday' | 'monday';
 export type DesktopWindowControlsPosition = 'left' | 'right';
 export type DesktopWindowControlsStyle = 'classic' | 'traffic-lights';
 export type FileEditorKeymap = 'default' | 'vim';
+export type LargeTextPasteBehavior = 'ask' | 'attach' | 'inline';
+
+export const DEFAULT_LARGE_TEXT_PASTE_BEHAVIOR: LargeTextPasteBehavior = 'ask';
+
+export const normalizeLargeTextPasteBehavior = (value: unknown): LargeTextPasteBehavior => {
+  if (value === 'attach' || value === 'inline' || value === 'ask') {
+    return value;
+  }
+  return DEFAULT_LARGE_TEXT_PASTE_BEHAVIOR;
+};
 
 function normalizeFileEditorKeymap(value: unknown): FileEditorKeymap {
   return value === 'vim' ? 'vim' : 'default';
@@ -37,6 +48,10 @@ type ContextPanelTab = {
       panel. Project plans are addressed by id because their markdown is
       server-owned and has no client-visible path. */
   projectPlanId: string | null;
+  /** The project that owns `projectPlanId`. Persisted with the tab so a
+      restored plan tab opens against its own project instead of guessing the
+      owner from whatever directory happens to be current. */
+  projectPlanRef: ProjectRef | null;
   dedupeKey: string;
   label: string | null;
   sessionTitleFallback: string | null;
@@ -50,6 +65,7 @@ type ContextPanelTabDescriptor = {
   mode: ContextPanelMode;
   targetPath?: string | null;
   projectPlanId?: string | null;
+  projectPlanRef?: ProjectRef | null;
   dedupeKey?: string | null;
   label?: string | null;
   sessionTitleFallback?: string | null;
@@ -191,6 +207,18 @@ const normalizePendingDiffScope = (value: unknown): PendingDiffScope | null => {
   return value === 'working' || value === 'staged' || value === 'turn' || value === 'branch' ? value : null;
 };
 
+/** A plan tab's owner must be a complete project reference or nothing; a
+    half-valid one is worse than none because it points the editor somewhere. */
+const normalizeContextPanelProjectPlanRef = (value: unknown): ProjectRef | null => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const candidate = value as { id?: unknown; path?: unknown };
+  const id = typeof candidate.id === 'string' ? candidate.id.trim() : '';
+  const path = typeof candidate.path === 'string' ? candidate.path.trim() : '';
+  return id && path ? { id, path } : null;
+};
+
 const buildDefaultContextPanelTabDedupeKey = (mode: ContextPanelMode, targetPath: string | null): string => {
   if (mode === 'file') {
     return targetPath || mode;
@@ -240,6 +268,7 @@ const createContextPanelTab = (descriptor: ContextPanelTabDescriptor): ContextPa
     projectPlanId: typeof descriptor.projectPlanId === 'string' && descriptor.projectPlanId.trim()
       ? descriptor.projectPlanId.trim()
       : null,
+    projectPlanRef: normalizeContextPanelProjectPlanRef(descriptor.projectPlanRef),
     dedupeKey,
     label: normalizeContextTabLabel(descriptor.label),
     sessionTitleFallback: normalizeContextTabLabel(descriptor.sessionTitleFallback),
@@ -300,6 +329,7 @@ const sanitizeContextPanelTabs = (tabs: unknown): ContextPanelTab[] => {
       mode?: unknown;
       targetPath?: unknown;
       projectPlanId?: unknown;
+      projectPlanRef?: unknown;
       dedupeKey?: unknown;
       label?: unknown;
       sessionTitleFallback?: unknown;
@@ -323,6 +353,19 @@ const sanitizeContextPanelTabs = (tabs: unknown): ContextPanelTab[] => {
     }
 
     const targetPath = normalizeContextTargetPath(typeof candidate.targetPath === 'string' ? candidate.targetPath : null);
+    const projectPlanId = typeof candidate.projectPlanId === 'string' && candidate.projectPlanId.trim()
+      ? candidate.projectPlanId.trim()
+      : null;
+    const projectPlanRef = normalizeContextPanelProjectPlanRef(candidate.projectPlanRef);
+    // `mode: 'plan'` covers two documents: a saved Project knowledge plan
+    // (needs both the plan id and its owning project) and a plain session
+    // filesystem plan (has neither). Only the half-identified form — id
+    // without owner — is unopenable: the editor would have to guess the
+    // project from the current directory, which is exactly the bug that made
+    // saved plans open empty. Such tabs are dropped rather than resurrected.
+    if (candidate.mode === 'plan' && (projectPlanId !== null) !== (projectPlanRef !== null)) {
+      continue;
+    }
     const dedupeKey = normalizeContextPanelTabDedupeKey(
       candidate.mode,
       targetPath,
@@ -338,9 +381,8 @@ const sanitizeContextPanelTabs = (tabs: unknown): ContextPanelTab[] => {
       id,
       mode: candidate.mode,
       targetPath,
-      projectPlanId: typeof candidate.projectPlanId === 'string' && candidate.projectPlanId.trim()
-        ? candidate.projectPlanId.trim()
-        : null,
+      projectPlanId,
+      projectPlanRef,
       dedupeKey,
       label: normalizeContextTabLabel(typeof candidate.label === 'string' ? candidate.label : null),
       sessionTitleFallback: normalizeContextTabLabel(typeof candidate.sessionTitleFallback === 'string' ? candidate.sessionTitleFallback : null),
@@ -405,20 +447,22 @@ const upsertContextPanelTab = (
   const existingIndex = baseTabs.findIndex((tab) => tab.id === nextTab.id);
   const tabs = existingIndex === -1
     ? [...baseTabs, nextTab]
-    : baseTabs.map((tab, index) => (index === existingIndex
-      ? {
-          ...tab,
-          mode: nextTab.mode,
-          targetPath: nextTab.targetPath || tab.targetPath,
-          dedupeKey: nextTab.dedupeKey,
-          label: nextTab.label,
-          sessionTitleFallback: nextTab.sessionTitleFallback || tab.sessionTitleFallback,
-          stagedDiff: nextTab.stagedDiff,
-          diffScope: nextTab.diffScope,
-          readOnly: nextTab.readOnly,
-          touchedAt: Date.now(),
-        }
-      : tab));
+     : baseTabs.map((tab, index) => (index === existingIndex
+       ? {
+           ...tab,
+           mode: nextTab.mode,
+           targetPath: nextTab.targetPath || tab.targetPath,
+           projectPlanId: nextTab.projectPlanId ?? tab.projectPlanId,
+           projectPlanRef: nextTab.projectPlanRef ?? tab.projectPlanRef,
+           dedupeKey: nextTab.dedupeKey,
+           label: nextTab.label,
+           sessionTitleFallback: nextTab.sessionTitleFallback || tab.sessionTitleFallback,
+           stagedDiff: nextTab.stagedDiff,
+           diffScope: nextTab.diffScope,
+           readOnly: nextTab.readOnly,
+           touchedAt: Date.now(),
+         }
+       : tab));
 
   // A background upsert (an agent working a page) keeps the panel exactly as
   // the user left it: closed stays closed, and whatever tab they were on
@@ -438,14 +482,19 @@ const upsertContextPanelTab = (
   };
 };
 
-const closeContextPanelTab = (
+const closeContextPanelTabs = (
   current: ContextPanelDirectoryState,
-  tabID: string,
+  tabIds: readonly string[],
 ): ContextPanelDirectoryState => {
-  const closedTab = current.tabs.find((tab) => tab.id === tabID) ?? null;
-  const nextTabs = current.tabs.filter((tab) => tab.id !== tabID);
+  const closed = new Set(tabIds);
+  const closedTabs = current.tabs.filter((tab) => closed.has(tab.id));
+  const nextTabs = current.tabs.filter((tab) => !closed.has(tab.id));
+  if (nextTabs.length === current.tabs.length) {
+    return current;
+  }
 
-  if (current.activeTabId !== tabID) {
+  const activeClosed = current.activeTabId ? closed.has(current.activeTabId) : false;
+  if (!activeClosed) {
     return {
       ...current,
       tabs: nextTabs,
@@ -455,10 +504,11 @@ const closeContextPanelTab = (
     };
   }
 
-  // Closing the active tab stays inside the active surface: activate the most
-  // recent remaining tab of the same mode, and when it was the last one just
-  // close the panel instead of jumping to another surface.
-  const sameModeTabs = closedTab ? nextTabs.filter((tab) => tab.mode === closedTab.mode) : [];
+  // Closing the active tab stays inside its surface: activate the most recent
+  // remaining tab of the same mode, and when none remain just close the panel
+  // instead of jumping to another surface.
+  const activeMode = closedTabs.find((tab) => tab.id === current.activeTabId)?.mode ?? null;
+  const sameModeTabs = activeMode ? nextTabs.filter((tab) => tab.mode === activeMode) : [];
   const nextSameModeTab = sameModeTabs.length > 0
     ? sameModeTabs.reduce((best, tab) => (tab.touchedAt >= best.touchedAt ? tab : best))
     : null;
@@ -545,6 +595,10 @@ const sanitizeContextPanelByDirectory = (
     let tabs = sanitizeContextPanelTabs(candidate.tabs);
     let activeTabId = typeof candidate.activeTabId === 'string' ? candidate.activeTabId : null;
 
+    // Legacy single-tab state can name a saved project plan, but it carries
+    // no owner and cannot be migrated into an openable saved-plan tab — that
+    // combination is dropped by sanitize above. A generic filesystem plan tab
+    // (no plan id) revives fine from the descriptor alone.
     if (tabs.length === 0 && (candidate.mode === 'diff' || candidate.mode === 'file' || candidate.mode === 'context' || candidate.mode === 'plan' || candidate.mode === 'chat')) {
       tabs = [createContextPanelTab({
         mode: candidate.mode,
@@ -784,6 +838,7 @@ interface UIStore {
   /** Active tab of the project context panel (notes/todos/plans). */
   projectContextTab: string;
   inputSpellcheckEnabled: boolean;
+  largeTextPasteBehavior: LargeTextPasteBehavior;
   wideChatLayoutEnabled: boolean;
   codeBlockLineWrap: boolean;
   showToolFileIcons: boolean;
@@ -826,6 +881,7 @@ interface UIStore {
   setActiveContextPanelTab: (directory: string, tabID: string) => void;
   reorderContextPanelTabs: (directory: string, activeTabID: string, overTabID: string) => void;
   closeContextPanelTab: (directory: string, tabID: string) => void;
+  closeContextPanelTabs: (directory: string, tabIds: readonly string[]) => void;
   closeContextPanel: (directory: string) => void;
   toggleContextPanelExpanded: (directory: string) => void;
   setContextPanelWidth: (directory: string, mode: ContextPanelMode, width: number) => void;
@@ -958,6 +1014,7 @@ interface UIStore {
   setProjectContextSidebarWidth: (width: number) => void;
   setProjectContextTab: (value: string) => void;
   setInputSpellcheckEnabled: (value: boolean) => void;
+  setLargeTextPasteBehavior: (value: LargeTextPasteBehavior) => void;
   setWideChatLayoutEnabled: (value: boolean) => void;
   setCodeBlockLineWrap: (value: boolean) => void;
   setShowToolFileIcons: (value: boolean) => void;
@@ -1120,6 +1177,7 @@ export const useUIStore = create<UIStore>()(
         projectContextSidebarWidth: 168,
         projectContextTab: 'notes',
         inputSpellcheckEnabled: false,
+        largeTextPasteBehavior: DEFAULT_LARGE_TEXT_PASTE_BEHAVIOR,
         wideChatLayoutEnabled: false,
         codeBlockLineWrap: true,
         showToolFileIcons: true,
@@ -1442,34 +1500,43 @@ export const useUIStore = create<UIStore>()(
         },
 
         closeContextPanelTab: (directory, tabID) => {
+          get().closeContextPanelTabs(directory, [tabID]);
+        },
+
+        closeContextPanelTabs: (directory, tabIds) => {
           const normalizedDirectory = normalizeDirectoryPath((directory || '').trim());
-          const normalizedTabID = (tabID || '').trim();
-          if (!normalizedDirectory || !normalizedTabID) {
+          const normalizedTabIds = (tabIds ?? [])
+            .map((id) => (id || '').trim())
+            .filter((id) => id.length > 0);
+          if (!normalizedDirectory || normalizedTabIds.length === 0) {
             return;
           }
 
-          const closingTab = get().contextPanelByDirectory[normalizedDirectory]?.tabs
-            .find((tab) => tab.id === normalizedTabID);
+          const closedTabs = normalizedTabIds
+            .map((id) => get().contextPanelByDirectory[normalizedDirectory]?.tabs.find((tab) => tab.id === id))
+            .filter((tab): tab is ContextPanelTab => Boolean(tab));
 
           set((state) => {
             const prev = state.contextPanelByDirectory[normalizedDirectory];
             const current = touchContextPanelState(prev);
-            if (!current.tabs.some((tab) => tab.id === normalizedTabID)) {
+            if (!current.tabs.some((tab) => normalizedTabIds.includes(tab.id))) {
               return state;
             }
 
             const byDirectory = {
               ...state.contextPanelByDirectory,
-              [normalizedDirectory]: closeContextPanelTab(current, normalizedTabID),
+              [normalizedDirectory]: closeContextPanelTabs(current, normalizedTabIds),
             };
 
             return { contextPanelByDirectory: clampContextPanelRoots(byDirectory, 20) };
           });
 
-          // Keep the editor's own open-file state in sync so a reopened
-          // editor surface does not resurrect the closed file.
-          if (closingTab?.mode === 'file' && closingTab.targetPath) {
-            useFilesViewTabsStore.getState().removeOpenPath(normalizedDirectory, closingTab.targetPath);
+          // Keep the editor's own open-file state in sync so closed files do not
+          // resurrect when the editor surface reopens.
+          for (const tab of closedTabs) {
+            if (tab.mode === 'file' && tab.targetPath) {
+              useFilesViewTabsStore.getState().removeOpenPath(normalizedDirectory, tab.targetPath);
+            }
           }
         },
 
@@ -2335,6 +2402,9 @@ export const useUIStore = create<UIStore>()(
         setInputSpellcheckEnabled: (value) => {
           set({ inputSpellcheckEnabled: value });
         },
+        setLargeTextPasteBehavior: (value) => {
+          set({ largeTextPasteBehavior: normalizeLargeTextPasteBehavior(value) });
+        },
         setWideChatLayoutEnabled: (value) => {
           set({ wideChatLayoutEnabled: value });
         },
@@ -2643,6 +2713,7 @@ export const useUIStore = create<UIStore>()(
           }
 
           state.fileEditorKeymap = normalizeFileEditorKeymap(state.fileEditorKeymap);
+          state.largeTextPasteBehavior = normalizeLargeTextPasteBehavior(state.largeTextPasteBehavior);
 
           if (typeof state.autoSaveEnabled !== 'boolean') {
             state.autoSaveEnabled = true;
@@ -2740,6 +2811,7 @@ export const useUIStore = create<UIStore>()(
           agentMemoryViewedAt: state.agentMemoryViewedAt,
           projectContextSidebarWidth: state.projectContextSidebarWidth,
           inputSpellcheckEnabled: state.inputSpellcheckEnabled,
+          largeTextPasteBehavior: state.largeTextPasteBehavior,
           wideChatLayoutEnabled: state.wideChatLayoutEnabled,
           codeBlockLineWrap: state.codeBlockLineWrap,
           showToolFileIcons: state.showToolFileIcons,
