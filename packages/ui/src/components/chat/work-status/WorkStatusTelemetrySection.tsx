@@ -27,7 +27,7 @@ export const WorkStatusTelemetrySection: React.FC<Props> = ({ sessionId, directo
   const storedExpanded = useUIStore(
     React.useCallback((state) => state.workStatusExpandedSections['telemetry'], []),
   );
-  const expanded = storedExpanded ?? false;
+  const expanded = storedExpanded ?? true;
 
   const sessionStatus = useSessionStatus(sessionId ?? '', directory ?? undefined);
   const isIdle = !sessionStatus || sessionStatus.type === 'idle';
@@ -89,7 +89,7 @@ export const WorkStatusTelemetrySection: React.FC<Props> = ({ sessionId, directo
       title={t('chat.workStatus.section.telemetry')}
       icon="bar-chart-2"
       summary={headerSummary}
-      defaultExpanded={false}
+      defaultExpanded
     >
       {tokensPerSecond !== null ? (
         <WorkStatusRow

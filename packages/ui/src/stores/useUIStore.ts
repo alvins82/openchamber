@@ -2503,12 +2503,23 @@ export const useUIStore = create<UIStore>()(
       {
         name: 'ui-store',
         storage: createDeferredSafeJSONStorage(),
-        version: 18,
+        version: 19,
         migrate: (persistedState, version) => {
           if (!persistedState || typeof persistedState !== 'object') {
             return persistedState;
           }
           const state = persistedState as Record<string, unknown>;
+
+          // v18 -> v19: seed opt-in telemetry section into stored hidden list for existing users
+          if (version < 19) {
+            if (Array.isArray(state.workStatusHiddenSections)) {
+              if (!state.workStatusHiddenSections.includes('telemetry')) {
+                state.workStatusHiddenSections.push('telemetry');
+              }
+            } else {
+              state.workStatusHiddenSections = ['telemetry'];
+            }
+          }
 
           // v15 -> v16: the main-area surface concept is gone from persistence
           // (the chat always owns the desktop main area; panel surfaces have
