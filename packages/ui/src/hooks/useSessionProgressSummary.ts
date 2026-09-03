@@ -55,6 +55,7 @@ type ProgressSummaryInternalState = {
 };
 
 export type SessionProgressSummaryState = {
+    isActive: boolean;
     summary: string | null;
     generatedAt: number | null;
     isGenerating: boolean;
@@ -80,6 +81,7 @@ type ProgressRequestBody = {
 };
 
 const EMPTY_PROGRESS_SUMMARY: SessionProgressSummaryState = {
+    isActive: false,
     summary: null,
     generatedAt: null,
     isGenerating: false,
@@ -271,7 +273,11 @@ const getActiveCommandKey = (state: State, sessionId: string): string => {
 
 const getEmptyInternalProgressSummary = (key: string): ProgressSummaryInternalState => ({
     key,
-    ...EMPTY_PROGRESS_SUMMARY,
+    summary: null,
+    generatedAt: null,
+    isGenerating: false,
+    commandSummary: null,
+    isCommandGenerating: false,
 });
 
 export function useSessionProgressSummary(
@@ -516,6 +522,7 @@ export function useSessionProgressSummary(
 
     if (!isActive || state.key !== progressKey) return EMPTY_PROGRESS_SUMMARY;
     return {
+        isActive: true,
         summary: state.summary,
         generatedAt: state.generatedAt,
         isGenerating: state.isGenerating,

@@ -152,6 +152,12 @@ call to the session's provider, are never persisted, and treat an unavailable
 Small Model as an invisible no-op. The setting is
 `liveProgressSummaryEnabled` (default on).
 
+While a turn is busy and this setting is enabled, the summary is rendered in the
+scrolling chat timeline and the active turn hides its low-level reasoning and
+tool rows. Completed turns keep their normal expandable details. If the Small
+Model is unavailable or returns unusable output, the card stays generic while
+the main-model turn continues unchanged.
+
 ## Which providers the pickers may offer
 
 `listAuthenticatedProviders()` answers one question for the Small Model and
