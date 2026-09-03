@@ -63,7 +63,7 @@ export type SessionProgressSummaryState = {
     isCommandGenerating: boolean;
 };
 
-export type ActiveCommandSnapshot = {
+type ActiveCommandSnapshot = {
     key: string;
     tool: string;
     command: string;
