@@ -138,6 +138,14 @@ other runtime API.
   `POST /api/small-model/generate` (`{ prompt, system?, maxOutputTokens?,
   model?, directory? }` → `{ text, providerID, modelID, source }`).
 
+The active-chat live progress summary uses the same generate route from the
+shared UI. After the active turn has run for 30 seconds, the UI samples a
+bounded, in-memory transcript containing the current user request and recent
+assistant/reasoning/tool parts, then repeats about every 30 seconds while the
+turn remains busy. It restricts the utility call to the session's provider,
+does not persist the generated text, and treats an unavailable Small Model as
+an invisible no-op. The setting is `liveProgressSummaryEnabled` (default on).
+
 ## Which providers the pickers may offer
 
 `listAuthenticatedProviders()` answers one question for the Small Model and

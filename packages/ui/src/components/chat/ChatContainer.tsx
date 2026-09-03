@@ -29,6 +29,7 @@ import { QuestionCard } from './QuestionCard';
 import { hasActiveQuestionToolInCurrentTurn, recoverPendingQuestionWithRetry } from '@/sync/question-recovery';
 import { StatusRowContainer } from './StatusRowContainer';
 import { SessionRecapNote } from '@/components/chat/SessionRecapSpacer';
+import { SessionProgressSummary } from '@/components/chat/SessionProgressSummary';
 import { SessionErrorNotice } from '@/components/chat/SessionErrorNotice';
 import ScrollToBottomButton from './components/ScrollToBottomButton';
 import { PromptNavigatorRail } from './components/PromptNavigatorRail';
@@ -1626,6 +1627,12 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({
                                         userOwnsScroll ? 'pointer-events-none' : 'pointer-events-auto',
                                     )}
                                 >
+                                    {currentSessionId ? (
+                                        <SessionProgressSummary
+                                            sessionId={currentSessionId}
+                                            directory={effectiveSessionDirectory}
+                                        />
+                                    ) : null}
                                     <StatusRowContainer />
                                 </div>
                             </div>
