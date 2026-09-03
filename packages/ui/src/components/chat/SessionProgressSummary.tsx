@@ -16,9 +16,15 @@ interface SessionProgressSummaryProps {
  */
 export const SessionProgressSummary: React.FC<SessionProgressSummaryProps> = React.memo(({ sessionId, directory }) => {
     const { t } = useI18n();
-    const { summary, isGenerating } = useSessionProgressSummary(sessionId, directory);
+    const {
+        summary,
+        commandSummary,
+        isGenerating,
+        isCommandGenerating,
+    } = useSessionProgressSummary(sessionId, directory);
+    const isGeneratingAnySummary = isGenerating || isCommandGenerating;
 
-    if (!summary && !isGenerating) return null;
+    if (!summary && !commandSummary && !isGeneratingAnySummary) return null;
 
     return (
         <div
@@ -34,11 +40,20 @@ export const SessionProgressSummary: React.FC<SessionProgressSummaryProps> = Rea
                         <span className="typography-meta font-medium text-foreground">
                             {t('chat.progressSummary.label')}
                         </span>
-                        {isGenerating ? <Icon name="loader-4" className="size-3.5 animate-spin text-muted-foreground" /> : null}
+                        {isGeneratingAnySummary ? <Icon name="loader-4" className="size-3.5 animate-spin text-muted-foreground" /> : null}
                     </div>
-                    <p className="mt-0.5 line-clamp-2 typography-meta text-muted-foreground">
-                        {summary ?? t('chat.progressSummary.generating')}
-                    </p>
+                    {commandSummary ? (
+                        <p className="mt-0.5 line-clamp-1 typography-meta text-muted-foreground">{commandSummary}</p>
+                    ) : null}
+                    {summary ? (
+                        <p className={`mt-0.5 ${commandSummary ? 'line-clamp-1' : 'line-clamp-2'} typography-meta text-muted-foreground`}>
+                            {summary}
+                        </p>
+                    ) : !commandSummary ? (
+                        <p className="mt-0.5 line-clamp-2 typography-meta text-muted-foreground">
+                            {t('chat.progressSummary.generating')}
+                        </p>
+                    ) : null}
                 </div>
             </div>
         </div>

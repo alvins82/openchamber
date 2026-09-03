@@ -1,7 +1,7 @@
 import type { Message, Part } from '@opencode-ai/sdk/v2';
 import { describe, expect, test } from 'bun:test';
 
-import { buildSessionProgressTranscript } from './useSessionProgressSummary';
+import { buildSessionProgressTranscript, getActiveCommandSnapshot } from './useSessionProgressSummary';
 
 const userMessage = (id: string): Message => ({
     id,
@@ -42,7 +42,7 @@ describe('buildSessionProgressTranscript', () => {
             [user.id, [part({ id: 'user-part', sessionID: 'session-1', messageID: user.id, type: 'text', text: 'Fix the failing tests.' })]],
             [assistant.id, [
                 part({ id: 'reasoning-part', sessionID: 'session-1', messageID: assistant.id, type: 'reasoning', text: 'Inspecting the test failure and the affected reducer.' , time: { start: 2 } }),
-                part({ id: 'tool-part', sessionID: 'session-1', messageID: assistant.id, type: 'tool', callID: 'call-1', tool: 'read', state: { status: 'running', input: {}, time: { start: 3 } } }),
+                part({ id: 'tool-part', sessionID: 'session-1', messageID: assistant.id, type: 'tool', callID: 'call-1', tool: 'bash', state: { status: 'running', input: { command: 'bun test packages/ui/src/hooks/useSessionProgressSummary.test.ts' }, time: { start: 3 } } }),
             ]],
         ]);
 
@@ -50,7 +50,7 @@ describe('buildSessionProgressTranscript', () => {
 
         expect(transcript).toContain('User:\nFix the failing tests.');
         expect(transcript).toContain('Reasoning: Inspecting the test failure');
-        expect(transcript).toContain('Tool read (running)');
+        expect(transcript).toContain('Tool bash (running): bun test packages/ui/src/hooks/useSessionProgressSummary.test.ts');
     });
 
     test('preserves both the request and the newest activity when context is capped', () => {
@@ -96,5 +96,66 @@ describe('buildSessionProgressTranscript', () => {
         );
 
         expect(transcript).toBe('User:\nCurrent request.');
+    });
+});
+
+describe('getActiveCommandSnapshot', () => {
+    test('finds the newest pending or running shell command and its description', () => {
+        const user = userMessage('user-1');
+        const assistant = assistantMessage('assistant-1', user.id);
+        const parts = [
+            part({ id: 'read-part', sessionID: 'session-1', messageID: assistant.id, type: 'tool', callID: 'call-read', tool: 'read', state: { status: 'running', input: {}, time: { start: 2 } } }),
+            part({ id: 'bash-part', sessionID: 'session-1', messageID: assistant.id, type: 'tool', callID: 'call-bash', tool: 'bash', state: { status: 'pending', input: { command: 'bun test', description: 'Check the changed tests' }, raw: '' } }),
+        ];
+
+        const snapshot = getActiveCommandSnapshot([user, assistant], (messageId) => messageId === assistant.id ? parts : []);
+
+        expect(snapshot?.tool).toBe('bash');
+        expect(snapshot?.command).toBe('bun test');
+        expect(snapshot?.description).toBe('Check the changed tests');
+        expect(snapshot?.key).toContain('bash-part');
+    });
+
+    test('does not report completed commands as active', () => {
+        const user = userMessage('user-1');
+        const assistant = assistantMessage('assistant-1', user.id);
+        const completed = part({
+            id: 'bash-part',
+            sessionID: 'session-1',
+            messageID: assistant.id,
+            type: 'tool',
+            callID: 'call-bash',
+            tool: 'bash',
+            state: {
+                status: 'completed',
+                input: { command: 'bun test' },
+                output: 'passed',
+                title: 'bun test',
+                metadata: {},
+                time: { start: 2, end: 3 },
+            },
+        });
+
+        expect(getActiveCommandSnapshot([user, assistant], () => [completed])).toBeNull();
+    });
+
+    test('ignores an unfinished command from a previous turn', () => {
+        const previousUser = userMessage('user-1');
+        const previousAssistant = assistantMessage('assistant-1', previousUser.id);
+        const currentUser = userMessage('user-2');
+        const previousCommand = part({
+            id: 'old-bash-part',
+            sessionID: 'session-1',
+            messageID: previousAssistant.id,
+            type: 'tool',
+            callID: 'old-call',
+            tool: 'bash',
+            state: { status: 'running', input: { command: 'bun test' }, time: { start: 2 } },
+        });
+
+        expect(getActiveCommandSnapshot(
+            [previousUser, previousAssistant, currentUser],
+            (messageId) => messageId === previousAssistant.id ? [previousCommand] : [],
+        )).toBeNull();
     });
 });
