@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import express from 'express';
 import path from 'path';
@@ -705,5 +705,53 @@ describe('OpenCode proxy SSE forwarding', () => {
     });
 
     expect(response.status).toBe(504);
+  });
+
+  it('does not log proxy error when the client aborts the request', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const upstream = express();
+    upstream.get('/hang', () => {});
+    upstreamServer = await listen(upstream);
+    const upstreamPort = upstreamServer.address().port;
+    const externalBaseUrl = `http://127.0.0.1:${upstreamPort}`;
+
+    const app = express();
+    registerOpenCodeProxy(app, {
+      fs: {},
+      os: {},
+      path,
+      OPEN_CODE_READY_GRACE_MS: 0,
+      LONG_REQUEST_TIMEOUT_MS: 5000,
+      getRuntime: () => ({
+        openCodePort: upstreamPort,
+        openCodeBaseUrl: externalBaseUrl,
+        isOpenCodeReady: true,
+        openCodeNotReadySince: 0,
+        isRestartingOpenCode: false,
+      }),
+      getOpenCodeAuthHeaders: () => ({}),
+      buildOpenCodeUrl: (requestPath) => `${externalBaseUrl}${requestPath}`,
+      ensureOpenCodeApiPrefix: () => {},
+    });
+    proxyServer = await listen(app);
+    const proxyPort = proxyServer.address().port;
+
+    const controller = new AbortController();
+    const fetchPromise = fetch(`http://127.0.0.1:${proxyPort}/api/hang`, {
+      signal: controller.signal,
+    }).catch(() => {});
+
+    // Abort after request has started
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    controller.abort();
+    await fetchPromise;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const proxyErrorLogs = errorSpy.mock.calls
+      .map((call) => call.join(' '))
+      .filter((msg) => msg.includes('[proxy] OpenCode proxy error:'));
+
+    expect(proxyErrorLogs).toHaveLength(0);
+    errorSpy.mockRestore();
   });
 });
