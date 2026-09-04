@@ -922,7 +922,6 @@ export const registerOpenCodeProxy = (app, deps) => {
       error: (err, req, res) => {
         if (
           req?.aborted ||
-          req?.destroyed ||
           res?.writableEnded ||
           res?.destroyed ||
           req?.socket?.destroyed ||
