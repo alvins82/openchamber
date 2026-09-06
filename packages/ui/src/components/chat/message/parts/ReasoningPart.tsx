@@ -10,6 +10,7 @@ import { useUIStore } from '@/stores/useUIStore';
 import { MarkdownRenderer } from '../../MarkdownRenderer';
 import { useStreamingTextThrottle } from '../../hooks/useStreamingTextThrottle';
 import { commitStreamedText } from '../../lib/streamTextCommit';
+import { useReasoningScrollFollow } from './useReasoningScrollFollow';
 import type { StreamPhase } from '../types';
 
 const TOOL_ROW_TEXT_CLASS = '!text-[length:var(--text-meta)] !leading-5 sm:!leading-6 tracking-normal';
@@ -119,8 +120,16 @@ export const ReasoningTimelineBlock: React.FC<ReasoningTimelineBlockProps> = ({
     const [shouldRenderExpandedContent, setShouldRenderExpandedContent] = React.useState(defaultExpanded === true || canAutoExpand);
     const contentId = React.useId();
     const contentRef = React.useRef<HTMLDivElement>(null);
+    const scrollRef = React.useRef<HTMLElement | null>(null);
+    const reasoningContentRef = React.useRef<HTMLDivElement | null>(null);
     const contentAnimationRef = React.useRef<AnimationPlaybackControls | null>(null);
     const contentMountedRef = React.useRef(false);
+    const { handleWheelCapture, handleScroll } = useReasoningScrollFollow(
+        scrollRef,
+        reasoningContentRef,
+        isStreaming,
+        text,
+    );
 
     const summary = React.useMemo(() => getReasoningSummary(text), [text]);
     const toggleAriaLabel = isExpanded
@@ -389,28 +398,20 @@ export const ReasoningTimelineBlock: React.FC<ReasoningTimelineBlockProps> = ({
                             className="pointer-events-none absolute left-0 top-0 bottom-0 w-px"
                             style={{ backgroundColor: 'var(--tools-border)' }}
                         />
-                        {isStreaming ? (
-                            // While streaming, let the thinking grow inline — no
-                            // capped, independently-scrollable box. The chat's own
-                            // auto-follow then handles following / releasing, so the
-                            // box never captures the wheel or fights the user's
-                            // scroll. The max-height scroll box is applied only once
-                            // the thinking has finished (the branch below).
-                            <div className="p-0">
-                                {reasoningBody}
-                            </div>
-                        ) : (
-                            <ScrollableOverlay
-                                as="div"
-                                outerClassName="max-h-80"
-                                className="p-0"
-                                useScrollShadow
-                                scrollShadowSize={36}
-                                userIntentOnly
-                            >
-                                {reasoningBody}
-                            </ScrollableOverlay>
-                        )}
+                        <ScrollableOverlay
+                            ref={scrollRef}
+                            as="div"
+                            outerClassName="max-h-80"
+                            className="p-0"
+                            data-scrollable="true"
+                            useScrollShadow
+                            scrollShadowSize={36}
+                            userIntentOnly
+                            onWheelCapture={handleWheelCapture}
+                            onScroll={handleScroll}
+                        >
+                            <div ref={reasoningContentRef}>{reasoningBody}</div>
+                        </ScrollableOverlay>
                     </div>
                 </div>
             ) : null}

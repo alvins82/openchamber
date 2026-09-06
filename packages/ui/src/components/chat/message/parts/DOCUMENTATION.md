@@ -46,6 +46,10 @@ Use this doc when you ask an agent to change tool/header/description behavior.
 - `ReasoningPart.tsx`
   - Thinking block UI (`ReasoningTimelineBlock`), summary + optional duration.
 
+- `useReasoningScrollFollow.ts`
+  - Keeps live reasoning pinned to the bottom while the rendered body grows,
+    with an explicit user-scroll opt-out.
+
 - `JustificationBlock.tsx`
   - Justification block wrapper over `ReasoningTimelineBlock`.
 
@@ -92,6 +96,7 @@ Use this doc when you ask an agent to change tool/header/description behavior.
 - Running bash output falls back to `state.metadata.output` until canonical `state.output` arrives. Its output viewport grows with the content up to `46vh`, then scrolls and follows new output until the user scrolls up; following resumes when the user returns to the bottom. Live output appends or replaces rewritten snapshots as plain text without worker highlighting; finalized output normalizes ANSI terminal controls with a bounded synthetic-cell budget, bypasses the throttle, and receives the normal one-time highlighted rendering.
 - Thinking/Justification duration is hidden in `sorted` mode (handled in `ReasoningPart.tsx` + `JustificationBlock.tsx`).
 - Reasoning streaming presentation derives from the live stream phase (`streaming`/`cooldown`), never from missing persisted timing: a cached part without `time.end` is not live, and a part whose `time.end` is set never streams (issue #2020).
+- While streaming, the reasoning body is constrained to a scrollable `max-h-80` container with auto-follow to the bottom as tokens commit; auto-follow pauses if the user scrolls up and resumes upon returning to the bottom.
 
 ## "I want to change description for Perplexity" (example recipe)
 

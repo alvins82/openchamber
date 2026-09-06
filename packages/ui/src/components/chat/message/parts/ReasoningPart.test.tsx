@@ -7,9 +7,29 @@ import type { Part } from '@opencode-ai/sdk/v2';
 
 import { I18nProvider } from '@/lib/i18n';
 import ReasoningPart, { ReasoningTimelineBlock } from './ReasoningPart';
+import { useReasoningScrollFollow } from './useReasoningScrollFollow';
 import type { StreamPhase } from '../types';
 
 type ReasoningPartFixture = Extract<Part, { type: 'reasoning' }>;
+
+class TestResizeObserver {
+  static instances: TestResizeObserver[] = [];
+
+  private readonly callback: () => void;
+
+  constructor(callback: () => void) {
+    this.callback = callback;
+    TestResizeObserver.instances.push(this);
+  }
+
+  observe(): void {}
+
+  disconnect(): void {}
+
+  trigger(): void {
+    this.callback();
+  }
+}
 
 /**
  * Mounts a real client root against a happy-dom document so mount/unmount
@@ -25,6 +45,7 @@ const DOM_GLOBAL_NAMES = [
   'Node',
   'Element',
   'HTMLElement',
+  'ResizeObserver',
   'IS_REACT_ACT_ENVIRONMENT',
 ] as const;
 
@@ -40,8 +61,10 @@ const installDomStub = () => {
     Node: happyWindow.Node,
     Element: happyWindow.Element,
     HTMLElement: happyWindow.HTMLElement,
+    ResizeObserver: TestResizeObserver,
     IS_REACT_ACT_ENVIRONMENT: true,
   };
+  TestResizeObserver.instances = [];
   for (const name of DOM_GLOBAL_NAMES) {
     Object.defineProperty(globalThis, name, { value: values[name], configurable: true, writable: true });
   }
@@ -58,8 +81,31 @@ const installDomStub = () => {
         if (descriptor) Object.defineProperty(globalThis, name, descriptor);
         else Reflect.deleteProperty(globalThis, name);
       }
+      happyWindow.close();
     },
   };
+};
+
+const ScrollFollowHarness: React.FC<{ text: string; isStreaming: boolean }> = ({ text, isStreaming }) => {
+  const scrollRef = React.useRef<HTMLDivElement | null>(null);
+  const contentRef = React.useRef<HTMLDivElement | null>(null);
+  const { handleWheelCapture, handleScroll } = useReasoningScrollFollow(
+    scrollRef,
+    contentRef,
+    isStreaming,
+    text,
+  );
+
+  return (
+    <div
+      ref={scrollRef}
+      data-scroll-follow-scroll="true"
+      onWheelCapture={handleWheelCapture}
+      onScroll={handleScroll}
+    >
+      <div ref={contentRef}>{text}</div>
+    </div>
+  );
 };
 
 // A reasoning text whose summary (first 120 chars) fits in the header but
@@ -237,6 +283,8 @@ describe('ReasoningPart streaming gating (issue #2020)', () => {
 
     expect(markup).toContain(BUSY_INDICATOR);
     expect(markup).toContain('aria-expanded="true"');
+    expect(markup).toContain('data-scrollable="true"');
+    expect(markup).toContain('max-h-80');
   });
 
   test('a live part with no committed text yet shows the busy header and no empty summary', () => {
@@ -254,7 +302,7 @@ describe('ReasoningPart streaming gating (issue #2020)', () => {
     expect(markup).not.toContain('title="');
   });
 
-  test('remounting a completed reasoning part does not re-trigger the streaming presentation', async () => {
+  test.serial('remounting a completed reasoning part does not re-trigger the streaming presentation', async () => {
     // renderToStaticMarkup cannot observe this: it has no mount lifecycle, so
     // comparing two server renders is true by construction. Mount, unmount and
     // remount a real client root instead, watching the busy indicator across
@@ -288,6 +336,73 @@ describe('ReasoningPart streaming gating (issue #2020)', () => {
 
       expect(busySeen).toEqual([false, false]);
       expect(dom.container.textContent).toContain(SHORT_REASONING);
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+      dom.restore();
+    }
+  });
+});
+
+describe('reasoning scroll follow', () => {
+  test.serial('keeps live reasoning pinned as the rendered body grows', async () => {
+    const dom = installDomStub();
+    const root = createRoot(dom.container);
+    let scrollHeight = 300;
+
+    try {
+      await act(async () => {
+        root.render(<ScrollFollowHarness text="first thought" isStreaming />);
+      });
+
+      const scrollElement = dom.container.querySelector('[data-scroll-follow-scroll]');
+      if (!(scrollElement instanceof HTMLElement)) {
+        throw new Error('Expected the scroll-follow harness to render a scroll element');
+      }
+
+      let scrollTop = 0;
+      Object.defineProperties(scrollElement, {
+        scrollHeight: {
+          configurable: true,
+          get: () => scrollHeight,
+        },
+        clientHeight: {
+          configurable: true,
+          value: 100,
+        },
+        scrollTop: {
+          configurable: true,
+          get: () => scrollTop,
+          set: (value: number) => {
+            scrollTop = Math.max(0, Math.min(value, scrollHeight - 100));
+          },
+        },
+      });
+
+      TestResizeObserver.instances[0]?.trigger();
+      expect(scrollElement.scrollTop).toBe(200);
+
+      await act(async () => {
+        scrollElement.scrollTop = 100;
+        const wheelEvent = new window.Event('wheel', { bubbles: true });
+        Object.defineProperty(wheelEvent, 'deltaY', { value: -40 });
+        scrollElement.dispatchEvent(wheelEvent);
+        scrollElement.dispatchEvent(new window.Event('scroll', { bubbles: true }));
+        root.render(<ScrollFollowHarness text="second thought" isStreaming />);
+      });
+      scrollHeight = 500;
+      TestResizeObserver.instances[0]?.trigger();
+      expect(scrollElement.scrollTop).toBe(100);
+
+      await act(async () => {
+        scrollElement.scrollTop = scrollHeight - 100;
+        scrollElement.dispatchEvent(new window.Event('scroll', { bubbles: true }));
+        root.render(<ScrollFollowHarness text="third thought" isStreaming />);
+      });
+      scrollHeight = 600;
+      TestResizeObserver.instances[0]?.trigger();
+      expect(scrollElement.scrollTop).toBe(500);
     } finally {
       await act(async () => {
         root.unmount();
