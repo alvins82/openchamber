@@ -1,6 +1,8 @@
 import React from 'react';
-import { useI18n } from '@/lib/i18n';
-import { useSessionMessageRecords, useSessionStatus } from '@/sync/sync-context';
+import { getCurrentIntlLocale, useI18n } from '@/lib/i18n';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { useDirectorySync, useSessionMessageRecords, useSyncDirectory, useSyncRuntime } from '@/sync/sync-context';
+import { normalizePath } from '@/lib/pathNormalization';
 import { useUIStore } from '@/stores/useUIStore';
 import {
   WorkStatusCollapsibleSection,
@@ -21,144 +23,162 @@ type Props = {
   directory: string | null;
 };
 
+/** One hover/focus target covers both the label and its value. */
+const TelemetryRow: React.FC<{ label: string; description: string; value: React.ReactNode }> = ({ label, description, value }) => (
+  <Tooltip delayDuration={750}>
+    <TooltipTrigger asChild>
+      <div tabIndex={0} className="min-w-0 rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        <WorkStatusRow label={label} value={value} />
+      </div>
+    </TooltipTrigger>
+    <TooltipContent side="left" sideOffset={8} className="max-w-[min(320px,calc(100vw-24px))] whitespace-normal break-words text-left">
+      <p className="font-medium">{label}</p>
+      <p>{description}</p>
+    </TooltipContent>
+  </Tooltip>
+);
+
 export const WorkStatusTelemetrySection: React.FC<Props> = ({ sessionId, directory }) => {
   const { t } = useI18n();
-
-  const storedExpanded = useUIStore(
-    React.useCallback((state) => state.workStatusExpandedSections['telemetry'], []),
+  const expanded = useUIStore(
+    React.useCallback((state) => state.workStatusExpandedSections['telemetry'] ?? true, []),
   );
-  const expanded = storedExpanded ?? true;
-
-  const sessionStatus = useSessionStatus(sessionId ?? '', directory ?? undefined);
-  const isIdle = !sessionStatus || sessionStatus.type === 'idle';
+  const { runtimeKey } = useSyncRuntime();
+  const syncDirectory = useSyncDirectory();
+  const scope = JSON.stringify([runtimeKey, normalizePath(directory ?? syncDirectory), sessionId]);
+  const status = useDirectorySync(
+    React.useCallback((state) => sessionId
+      ? state.session_status[sessionId]?.type ?? (state.sessionStatusReady ? 'idle' : 'unknown')
+      : 'unknown', [sessionId]),
+    directory ?? undefined,
+  );
+  const eligibleForStats = Boolean(sessionId && expanded && status === 'idle');
 
   const records = useSessionMessageRecords(
     sessionId ?? '',
     directory ?? undefined,
-    { enabled: expanded },
+    { enabled: eligibleForStats },
   );
 
-  const lastStatsRef = React.useRef<CompletedTurnStats | null>(null);
-  const lastSessionIdRef = React.useRef<string | null>(sessionId);
+  const computed = React.useMemo(() => {
+    if (!eligibleForStats) return null;
+    return getLatestCompletedTurnStats(records);
+  }, [eligibleForStats, records]);
 
-  if (lastSessionIdRef.current !== sessionId) {
-    lastSessionIdRef.current = sessionId;
-    lastStatsRef.current = null;
-  }
-
-  const stats = React.useMemo(() => {
-    if (!sessionId) return null;
-    if (isIdle) {
-      if (!records || records.length === 0) return null;
-      const computed = getLatestCompletedTurnStats(records);
-      lastStatsRef.current = computed;
-      return computed;
+  // Retain only one committed result, never message history or a global ID cache.
+  const [retained, setRetained] = React.useState<{ scope: string; stats: CompletedTurnStats | null } | null>(null);
+  React.useEffect(() => {
+    if (eligibleForStats) {
+      setRetained({ scope, stats: computed });
+    } else {
+      setRetained((previous) => previous?.scope === scope && status !== 'unknown' ? previous : null);
     }
-    return lastStatsRef.current;
-  }, [sessionId, records, isIdle]);
+  }, [scope, status, eligibleForStats, computed]);
+  const stats = eligibleForStats ? computed : status !== 'unknown' && retained?.scope === scope ? retained.stats : null;
+  const summary = stats && stats.responseTokensPerSecond !== null
+    ? formatThroughputRate(stats.responseTokensPerSecond)
+    : undefined;
 
-  useReportWorkStatusPresence('telemetry', stats !== null);
+  useReportWorkStatusPresence('telemetry', Boolean(sessionId));
 
-  if (!sessionId || !stats) return null;
-
-  const {
-    stepsCount,
-    totalLlmDurationMs,
-    totalToolDurationMs,
-    avgTtftMs,
-    tokensPerSecond,
-    inputTokens,
-    outputTokens,
-    reasoningTokens,
-    totalGeneratedTokens,
-    cacheHitPercent,
-    cost,
-  } = stats;
-
-  const headerSummary = tokensPerSecond !== null
-    ? `${formatThroughputRate(tokensPerSecond)} · ${formatTelemetryDuration(totalLlmDurationMs)}`
-    : formatTelemetryDuration(totalLlmDurationMs);
-
-  const tokensOutLabel = reasoningTokens > 0
-    ? `${formatTelemetryTokens(totalGeneratedTokens)} out+reasoning`
-    : `${formatTelemetryTokens(outputTokens)} out`;
+  if (!sessionId) return null;
 
   return (
     <WorkStatusCollapsibleSection
       id="telemetry"
       title={t('chat.workStatus.section.telemetry')}
       icon="bar-chart-2"
-      summary={headerSummary}
+      summary={summary}
       defaultExpanded
     >
-      {tokensPerSecond !== null ? (
-        <WorkStatusRow
-          icon="timer"
-          label={t('chat.workStatus.telemetry.speed')}
-          value={<WorkStatusValue tone="success">{formatThroughputRate(tokensPerSecond)}</WorkStatusValue>}
-        />
-      ) : null}
+      {stats ? (
+        <>
+          {stats.responseTokensPerSecond !== null ? (
+            <TelemetryRow
+              label={t('chat.workStatus.telemetry.responseSpeed')}
+              description={t('chat.workStatus.telemetry.responseSpeedDescription')}
+              value={<WorkStatusValue>{formatThroughputRate(stats.responseTokensPerSecond)}</WorkStatusValue>}
+            />
+          ) : null}
+          {stats.tokensPerSecond !== null ? (
+            <TelemetryRow
+              label={t('chat.workStatus.telemetry.speed')}
+              description={t('chat.workStatus.telemetry.speedDescription')}
+              value={<WorkStatusValue>{formatThroughputRate(stats.tokensPerSecond)}</WorkStatusValue>}
+            />
+          ) : null}
 
-      <WorkStatusRow
-        icon="time"
-        label={t('chat.workStatus.telemetry.llmDuration')}
-        value={<WorkStatusValue>{formatTelemetryDuration(totalLlmDurationMs)}</WorkStatusValue>}
-      />
+          {stats.totalLlmDurationMs !== null ? (
+            <TelemetryRow
+              label={t('chat.workStatus.telemetry.llmDuration')}
+              description={t('chat.workStatus.telemetry.llmDurationDescription')}
+              value={<WorkStatusValue>{formatTelemetryDuration(stats.totalLlmDurationMs)}</WorkStatusValue>}
+            />
+          ) : null}
 
-      {totalToolDurationMs > 0 ? (
-        <WorkStatusRow
-          icon="command"
-          label={t('chat.workStatus.telemetry.toolDuration')}
-          value={<WorkStatusValue>{formatTelemetryDuration(totalToolDurationMs)}</WorkStatusValue>}
-        />
-      ) : null}
+          {stats.totalToolDurationMs !== null ? (
+            <TelemetryRow
+              label={t('chat.workStatus.telemetry.toolDuration')}
+              description={t('chat.workStatus.telemetry.toolDurationDescription')}
+              value={<WorkStatusValue>{formatTelemetryDuration(stats.totalToolDurationMs)}</WorkStatusValue>}
+            />
+          ) : null}
 
-      {avgTtftMs !== null ? (
-        <WorkStatusRow
-          icon="timer"
-          label={t('chat.workStatus.telemetry.ttft')}
-          value={<WorkStatusValue>{formatTelemetryDuration(avgTtftMs)}</WorkStatusValue>}
-        />
-      ) : null}
+          {stats.avgTtftMs !== null ? (
+            <TelemetryRow
+              label={t('chat.workStatus.telemetry.ttft')}
+              description={t('chat.workStatus.telemetry.ttftDescription')}
+              value={<WorkStatusValue>{formatTelemetryDuration(stats.avgTtftMs)}</WorkStatusValue>}
+            />
+          ) : null}
 
-      {stepsCount > 1 ? (
-        <WorkStatusRow
-          icon="checkbox-circle"
-          label={t('chat.workStatus.telemetry.steps')}
-          value={<WorkStatusValue>{stepsCount}</WorkStatusValue>}
-        />
-      ) : null}
+          {stats.stepsCount > 1 ? (
+            <TelemetryRow
+              label={t('chat.workStatus.telemetry.steps')}
+              description={t('chat.workStatus.telemetry.stepsDescription')}
+              value={<WorkStatusValue>{stats.stepsCount}</WorkStatusValue>}
+            />
+          ) : null}
 
-      {inputTokens > 0 || totalGeneratedTokens > 0 ? (
-        <WorkStatusRow
-          icon="file-code"
-          label={t('chat.workStatus.telemetry.tokens')}
-          value={(
-            <WorkStatusValue>
-              {`${formatTelemetryTokens(inputTokens)} in · ${tokensOutLabel}`}
-            </WorkStatusValue>
-          )}
-        />
-      ) : null}
+          {stats.inputTokens !== null && stats.outputTokens !== null && stats.reasoningTokens !== null && stats.totalGeneratedTokens !== null ? (
+            <TelemetryRow
+              label={t('chat.workStatus.telemetry.tokens')}
+              description={t('chat.workStatus.telemetry.tokensDescription', {
+                input: stats.inputTokens.toLocaleString(getCurrentIntlLocale()),
+                output: stats.outputTokens.toLocaleString(getCurrentIntlLocale()),
+                reasoning: stats.reasoningTokens.toLocaleString(getCurrentIntlLocale()),
+              })}
+              value={(
+                <WorkStatusValue>
+                  {t('chat.workStatus.telemetry.tokens.inOut', {
+                    input: formatTelemetryTokens(stats.inputTokens),
+                    output: formatTelemetryTokens(stats.totalGeneratedTokens),
+                  })}
+                </WorkStatusValue>
+              )}
+            />
+          ) : null}
 
-      {cacheHitPercent !== null ? (
-        <WorkStatusRow
-          icon="donut-chart"
-          label={t('chat.workStatus.telemetry.cacheHit')}
-          value={(
-            <WorkStatusValue tone={cacheHitPercent >= 50 ? 'success' : 'default'}>
-              {`${cacheHitPercent}%`}
-            </WorkStatusValue>
-          )}
-        />
-      ) : null}
+          {stats.cacheHitPercent !== null ? (
+            <TelemetryRow
+              label={t('chat.workStatus.telemetry.cacheHit')}
+              description={t('chat.workStatus.telemetry.cacheHitDescription')}
+              value={(
+                <WorkStatusValue tone={stats.cacheHitPercent >= 50 ? 'success' : 'default'}>
+                  {`${stats.cacheHitPercent}%`}
+                </WorkStatusValue>
+              )}
+            />
+          ) : null}
 
-      {cost !== null ? (
-        <WorkStatusRow
-          icon="briefcase"
-          label={t('chat.workStatus.telemetry.cost')}
-          value={<WorkStatusValue tone="muted">{`$${cost.toFixed(3).replace(/0+$/, '').replace(/\.$/, '')}`}</WorkStatusValue>}
-        />
+          {stats.cost !== null ? (
+            <TelemetryRow
+              label={t('chat.workStatus.telemetry.cost')}
+              description={t('chat.workStatus.telemetry.costDescription')}
+              value={<WorkStatusValue tone="muted">{`$${stats.cost.toFixed(3).replace(/0+$/, '').replace(/\.$/, '')}`}</WorkStatusValue>}
+            />
+          ) : null}
+        </>
       ) : null}
     </WorkStatusCollapsibleSection>
   );

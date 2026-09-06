@@ -148,7 +148,6 @@ export const WorkStatusPanel: React.FC<Props> = ({ sessionId, directory, visible
     // swallow the very press that opens it.
     if (!overlay || !visible) return undefined;
     const onPointerDown = (event: PointerEvent) => {
-      // SAFETY: DOM Event target cast to HTMLElement to check contains and closest
       const target = event.target as HTMLElement | null;
       if (overlayRef.current?.contains(target)) return;
       // The header toggle closes it on its own; letting this fire too would

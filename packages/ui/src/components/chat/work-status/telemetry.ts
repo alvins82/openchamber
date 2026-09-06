@@ -1,36 +1,35 @@
 import type { Message, Part } from '@opencode-ai/sdk/v2';
 import { computeCacheHitRate } from '@/stores/utils/tokenUtils';
 
-export type SessionMessageRecord = {
+type SessionMessageRecord = {
   info: Message;
   parts: Part[];
 };
 
-export type CompletedStepStats = {
-  stepId: string;
-  totalDurationMs: number;
-  toolDurationMs: number;
-  adjustedLlmDurationMs: number;
+type CompletedStepStats = {
+  toolDurationMs: number | null;
+  adjustedLlmDurationMs: number | null;
   ttftMs: number | null;
-  inputTokens: number;
-  outputTokens: number;
-  reasoningTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  reasoningTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheWriteTokens: number | null;
   cost: number | null;
 };
 
 export type CompletedTurnStats = {
   lastAssistantMessageId: string;
   stepsCount: number;
-  totalLlmDurationMs: number;
-  totalToolDurationMs: number;
+  totalLlmDurationMs: number | null;
+  totalToolDurationMs: number | null;
   avgTtftMs: number | null;
   tokensPerSecond: number | null;
-  inputTokens: number;
-  outputTokens: number;
-  reasoningTokens: number;
-  totalGeneratedTokens: number;
+  responseTokensPerSecond: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  reasoningTokens: number | null;
+  totalGeneratedTokens: number | null;
   cacheHitPercent: number | null;
   cost: number | null;
 };
@@ -104,78 +103,94 @@ export const formatThroughputRate = (tps: number): string => {
   return `~${Math.round(tps)} tok/s`;
 };
 
-const sanitizeTokenCount = (value: number | undefined): number => {
-  return value !== undefined && Number.isFinite(value) && value > 0 ? value : 0;
-};
+const nonnegative = (value: number | undefined): number | null =>
+  value !== undefined && Number.isFinite(value) && value >= 0 ? value : null;
+
+const add = (left: number | null, right: number | null): number | null =>
+  left === null || right === null ? null : nonnegative(left + right);
+
+/** Text delivery rate for the final reply, not throughput of the agent loop. */
+function calculateResponseTokenRate(record: SessionMessageRecord): number | null {
+  const { info, parts } = record;
+  if (info.role !== 'assistant' || info.error || parts.some((part) => part.type === 'tool')) return null;
+  const output = nonnegative(info.tokens?.output);
+  const { created, completed } = info.time;
+  if (output === null || completed === undefined || nonnegative(created) === null || nonnegative(completed) === null) return null;
+
+  const intervals: Array<[number, number]> = [];
+  for (const part of parts) {
+    if (part.type !== 'text') continue;
+    // Synthetic/ignored text cannot be matched to the provider's output count.
+    if (part.synthetic || part.ignored) return null;
+    if (!part.text) continue;
+    const start = part.time?.start;
+    const end = part.time?.end;
+    if (start === undefined || end === undefined || !Number.isFinite(start) || !Number.isFinite(end)
+      || start < created || end > completed || end <= start) return null;
+    intervals.push([start, end]);
+  }
+  const duration = sumIntervalsDuration(mergeTimeIntervals(intervals));
+  return duration > 0 ? nonnegative(output / (duration / 1000)) : null;
+}
 
 /**
  * Calculate stats for a single completed assistant step.
  */
-export function calculateCompletedStepStats(record: SessionMessageRecord): CompletedStepStats | null {
+function calculateCompletedStepStats(record: SessionMessageRecord): CompletedStepStats | null {
   const { info, parts } = record;
   if (info.role !== 'assistant') return null;
 
   const { created } = info.time;
   const completed = info.time.completed;
 
-  if (completed === undefined || !Number.isFinite(created) || !Number.isFinite(completed) || completed < created) {
-    return null;
-  }
+  if (completed === undefined) return null;
 
-  const totalDurationMs = completed - created;
+  const validWindow = nonnegative(created) !== null && nonnegative(completed) !== null && completed >= created;
+  const totalDurationMs = validWindow ? nonnegative(completed - created) : null;
 
-  // Collect tool intervals from completed tool states
+  // An unfinished or invalid tool makes duration-dependent metrics unknown.
   const rawToolIntervals: Array<[number, number]> = [];
+  let validTools = validWindow;
   for (const part of parts) {
-    if (part.type === 'tool' && part.state.status === 'completed') {
-      const { start, end } = part.state.time;
-      if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
-        rawToolIntervals.push([start, end]);
-      }
+    if (part.type !== 'tool') continue;
+    if (part.state.status !== 'completed' && part.state.status !== 'error') {
+      validTools = false;
+      continue;
     }
+    const start = part.state.time?.start;
+    const end = part.state.time?.end;
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < created || end > completed || end < start) {
+      validTools = false;
+      continue;
+    }
+    rawToolIntervals.push([start, end]);
   }
 
-  const mergedToolIntervals = mergeTimeIntervals(rawToolIntervals);
-  const toolDurationMs = sumIntervalsDuration(mergedToolIntervals);
-  const adjustedLlmDurationMs = Math.max(0, totalDurationMs - toolDurationMs);
+  const toolDurationMs = validTools ? nonnegative(sumIntervalsDuration(mergeTimeIntervals(rawToolIntervals))) : null;
+  const adjustedLlmDurationMs = totalDurationMs !== null && toolDurationMs !== null
+    ? nonnegative(totalDurationMs - toolDurationMs)
+    : null;
 
   // Measure TTFT from first text or reasoning part start timestamp
   let ttftMs: number | null = null;
   for (const part of parts) {
     if (part.type === 'text' || part.type === 'reasoning') {
       const partStart = part.time?.start;
-      if (partStart !== undefined && Number.isFinite(partStart) && partStart >= created && partStart <= completed) {
+      if (validWindow && partStart !== undefined && Number.isFinite(partStart) && partStart >= created && partStart <= completed) {
         const delta = partStart - created;
-        if (delta >= 0 && delta <= totalDurationMs) {
-          ttftMs = delta;
-          break;
-        }
+        ttftMs = ttftMs === null ? delta : Math.min(ttftMs, delta);
       }
     }
   }
 
-  // Token breakdown (authoritative numbers only, zero fabricated/character estimates)
-  let inputTokens = 0;
-  let outputTokens = 0;
-  let reasoningTokens = 0;
-  let cacheReadTokens = 0;
-  let cacheWriteTokens = 0;
-
-  if (info.tokens) {
-    inputTokens = sanitizeTokenCount(info.tokens.input);
-    outputTokens = sanitizeTokenCount(info.tokens.output);
-    reasoningTokens = sanitizeTokenCount(info.tokens.reasoning);
-    cacheReadTokens = sanitizeTokenCount(info.tokens.cache?.read);
-    cacheWriteTokens = sanitizeTokenCount(info.tokens.cache?.write);
-  }
-
-  const cost = info.cost !== undefined && Number.isFinite(info.cost) && info.cost > 0
-    ? info.cost
-    : null;
+  const inputTokens = nonnegative(info.tokens?.input);
+  const outputTokens = nonnegative(info.tokens?.output);
+  const reasoningTokens = nonnegative(info.tokens?.reasoning);
+  const cacheReadTokens = nonnegative(info.tokens?.cache?.read);
+  const cacheWriteTokens = nonnegative(info.tokens?.cache?.write);
+  const cost = nonnegative(info.cost);
 
   return {
-    stepId: info.id,
-    totalDurationMs,
     toolDurationMs,
     adjustedLlmDurationMs,
     ttftMs,
@@ -188,14 +203,6 @@ export function calculateCompletedStepStats(record: SessionMessageRecord): Compl
   };
 }
 
-// Module-level memoization cache keyed by last completed assistant message ID.
-// Guarantees completed turns are calculated once and never re-evaluated during later streaming.
-const turnStatsCache = new Map<string, CompletedTurnStats>();
-
-export function clearTurnStatsCacheForTests(): void {
-  turnStatsCache.clear();
-}
-
 /**
  * Calculates telemetry metrics for the latest completed turn in the session.
  * A turn encompasses all assistant steps since the preceding user message up to the final completed assistant step.
@@ -205,110 +212,80 @@ export function getLatestCompletedTurnStats(
 ): CompletedTurnStats | null {
   if (!records || records.length === 0) return null;
 
-  // Find the last completed assistant step index
-  let lastCompletedAssistantIdx = -1;
+  // Only the newest user-bounded turn qualifies. A partial newer turn must not
+  // be published as complete or silently replaced with an older turn's stats.
+  const lastCompletedAssistantIdx = records.length - 1;
+  if (records[lastCompletedAssistantIdx].info.role !== 'assistant') return null;
+  let turnStartIdx = -1;
   for (let i = records.length - 1; i >= 0; i -= 1) {
     const record = records[i];
-    if (record.info.role === 'assistant') {
-      const completed = record.info.time.completed;
-      if (completed !== undefined && Number.isFinite(completed)) {
-        lastCompletedAssistantIdx = i;
-        break;
-      }
-    }
-  }
-
-  if (lastCompletedAssistantIdx === -1) return null;
-
-  const lastAssistantRecord = records[lastCompletedAssistantIdx];
-  const cacheKey = lastAssistantRecord.info.id;
-
-  const cached = turnStatsCache.get(cacheKey);
-  if (cached) return cached;
-
-  // Find preceding user message index that began this turn
-  let turnStartIdx = 0;
-  for (let i = lastCompletedAssistantIdx - 1; i >= 0; i -= 1) {
-    if (records[i].info.role === 'user') {
+    if (record.info.role === 'user') {
       turnStartIdx = i + 1;
       break;
     }
   }
 
-  // Collect all completed assistant steps within this turn
+  if (turnStartIdx === -1) return null;
+
   const stepStatsList: CompletedStepStats[] = [];
   for (let i = turnStartIdx; i <= lastCompletedAssistantIdx; i += 1) {
     const record = records[i];
     if (record.info.role === 'assistant') {
       const stepStats = calculateCompletedStepStats(record);
-      if (stepStats) {
-        stepStatsList.push(stepStats);
-      }
+      if (!stepStats) return null;
+      stepStatsList.push(stepStats);
     }
   }
 
   if (stepStatsList.length === 0) return null;
 
-  let totalLlmDurationMs = 0;
-  let totalToolDurationMs = 0;
-  let totalInputTokens = 0;
-  let totalOutputTokens = 0;
-  let totalReasoningTokens = 0;
-  let totalCacheReadTokens = 0;
-  let totalCacheWriteTokens = 0;
-  let totalCost = 0;
-  const ttftSamples: number[] = [];
+  let totalLlmDurationMs: number | null = 0;
+  let totalToolDurationMs: number | null = 0;
+  let totalInputTokens: number | null = 0;
+  let totalOutputTokens: number | null = 0;
+  let totalReasoningTokens: number | null = 0;
+  let totalCacheReadTokens: number | null = 0;
+  let totalCacheWriteTokens: number | null = 0;
+  let totalCost: number | null = 0;
+  let totalTtft: number | null = 0;
 
   for (const step of stepStatsList) {
-    totalLlmDurationMs += step.adjustedLlmDurationMs;
-    totalToolDurationMs += step.toolDurationMs;
-    totalInputTokens += step.inputTokens;
-    totalOutputTokens += step.outputTokens;
-    totalReasoningTokens += step.reasoningTokens;
-    totalCacheReadTokens += step.cacheReadTokens;
-    totalCacheWriteTokens += step.cacheWriteTokens;
-    if (step.ttftMs !== null) {
-      ttftSamples.push(step.ttftMs);
-    }
-    if (step.cost !== null) {
-      totalCost += step.cost;
-    }
+    totalLlmDurationMs = add(totalLlmDurationMs, step.adjustedLlmDurationMs);
+    totalToolDurationMs = add(totalToolDurationMs, step.toolDurationMs);
+    totalInputTokens = add(totalInputTokens, step.inputTokens);
+    totalOutputTokens = add(totalOutputTokens, step.outputTokens);
+    totalReasoningTokens = add(totalReasoningTokens, step.reasoningTokens);
+    totalCacheReadTokens = add(totalCacheReadTokens, step.cacheReadTokens);
+    totalCacheWriteTokens = add(totalCacheWriteTokens, step.cacheWriteTokens);
+    totalCost = add(totalCost, step.cost);
+    totalTtft = add(totalTtft, step.ttftMs);
   }
 
-  const avgTtftMs = ttftSamples.length > 0
-    ? ttftSamples.reduce((sum, val) => sum + val, 0) / ttftSamples.length
+  const avgTtftMs = totalTtft === null ? null : totalTtft / stepStatsList.length;
+
+  const totalGeneratedTokens = add(totalOutputTokens, totalReasoningTokens);
+  const tokensPerSecond = totalGeneratedTokens !== null && totalLlmDurationMs !== null && totalLlmDurationMs > 0
+    ? nonnegative(totalGeneratedTokens / (totalLlmDurationMs / 1000))
     : null;
 
-  const totalGeneratedTokens = totalOutputTokens + totalReasoningTokens;
-  const totalLlmSeconds = totalLlmDurationMs / 1000;
-
-  const tokensPerSecond = totalGeneratedTokens > 0 && totalLlmSeconds > 0
-    ? Math.round(totalGeneratedTokens / totalLlmSeconds)
-    : null;
-
-  const cacheHit = computeCacheHitRate({
+  const cacheHit = totalInputTokens !== null && totalCacheReadTokens !== null && totalCacheWriteTokens !== null ? computeCacheHitRate({
     input: totalInputTokens,
-    cache: {
-      read: totalCacheReadTokens,
-      write: totalCacheWriteTokens,
-    },
-  });
+    cache: { read: totalCacheReadTokens, write: totalCacheWriteTokens },
+  }) : null;
 
-  const result: CompletedTurnStats = {
-    lastAssistantMessageId: cacheKey,
+  return {
+    lastAssistantMessageId: records[lastCompletedAssistantIdx].info.id,
     stepsCount: stepStatsList.length,
     totalLlmDurationMs,
     totalToolDurationMs,
     avgTtftMs,
     tokensPerSecond,
+    responseTokensPerSecond: calculateResponseTokenRate(records[lastCompletedAssistantIdx]),
     inputTokens: totalInputTokens,
     outputTokens: totalOutputTokens,
     reasoningTokens: totalReasoningTokens,
     totalGeneratedTokens,
-    cacheHitPercent: cacheHit.hasInput && totalCacheReadTokens > 0 ? Math.round(cacheHit.percent) : null,
-    cost: totalCost > 0 ? totalCost : null,
+    cacheHitPercent: cacheHit?.hasInput ? Math.round(cacheHit.percent) : null,
+    cost: totalCost,
   };
-
-  turnStatsCache.set(cacheKey, result);
-  return result;
 }
