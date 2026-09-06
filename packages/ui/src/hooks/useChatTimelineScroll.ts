@@ -4,6 +4,7 @@ import { MessageFreshnessDetector } from '@/lib/messageFreshness';
 import { createScrollSpy } from '@/components/chat/lib/scroll/scrollSpy';
 import { useViewportStore } from '@/sync/viewport-store';
 import { useUIStore } from '@/stores/useUIStore';
+import type { TimelineRevealGate } from '@/components/chat/timelineRevealGate';
 import {
     CHAT_LIST_ANCHOR_OFFSET,
     getAnchoredTurnMetrics,
@@ -76,8 +77,19 @@ interface UseChatTimelineScrollOptions {
     // Id of the newest user message in the rendered timeline. When a send has
     // armed the anchor, the next new id here becomes the anchored row.
     lastUserMessageId: string | null;
+    // True while the session is producing output. Follow corrections glide
+    // only then. Outside a live stream — entering a session, a tab becoming
+    // active, rows re-measuring after a switch — the viewport must land on
+    // the end instantly: an animated catch-up scrolls visibly through the
+    // conversation and gets cut short by the next measurement.
+    sessionIsWorking: boolean;
+    // Reveal gate of the session being opened. Held until the viewport is
+    // pinned to the end, so the session is never shown scrolled to the top.
+    revealGate?: TimelineRevealGate | null;
     onActiveTurnChange?: (turnId: string | null) => void;
 }
+
+
 
 export interface UseChatTimelineScrollResult {
     scrollRef: React.RefObject<HTMLDivElement | null>;
@@ -122,8 +134,12 @@ export const useChatTimelineScroll = ({
     sessionMessageCount,
     composerOverlayHeight,
     lastUserMessageId,
+    sessionIsWorking,
+    revealGate = null,
     onActiveTurnChange,
 }: UseChatTimelineScrollOptions): UseChatTimelineScrollResult => {
+    const sessionIsWorkingRef = React.useRef(sessionIsWorking);
+    sessionIsWorkingRef.current = sessionIsWorking;
     const scrollRef = React.useRef<HTMLDivElement | null>(null);
     const listRef = React.useRef<TimelineListHandle | null>(null);
 
@@ -565,10 +581,10 @@ export const useChatTimelineScroll = ({
     // list's size compensation instead. Deliberately NO snap back to the end
     // afterwards for a mid-conversation reader: a slow drag settles
     // repeatedly, and each snap reads as the very jump this suspension
-    // removes. A reader who WAS at the end is the exception — after rows
-    // re-wrap, stale cached sizes can leave a large phantom gap below the
-    // last row, so re-asserting the end once on settle is what "staying
-    // where the reader is" means for them.
+    // removes. A reader pinned to a STREAMING session is the exception — the
+    // live edge is what they are watching, so the end is re-asserted once on
+    // settle. A pinned reader of an idle session gets no scroll at all: if the
+    // re-wrap moved the viewport off the end, the pin is released instead.
     const widthResizingRef = React.useRef(false);
     React.useEffect(() => {
         if (!scrollNode || typeof ResizeObserver === 'undefined') return;
@@ -588,7 +604,27 @@ export const useChatTimelineScroll = ({
             quietTimer = setTimeout(() => {
                 quietTimer = null;
                 widthResizingRef.current = false;
-                if (isAtEndRef.current && pendingAnchorRef.current === null) {
+                if (!isAtEndRef.current || pendingAnchorRef.current !== null) return;
+                if (!sessionIsWorkingRef.current) {
+                    // An idle pinned reader asked for nothing — a width change
+                    // must not scroll them. If the re-wrap left the viewport
+                    // off the end, release the pin instead of snapping back;
+                    // the scroll-to-bottom pill offers the way home.
+                    const listState = listRef.current?.getState();
+                    const atEndNow = listState ? resolveTimelineIsAtEnd(listState) : undefined;
+                    if (atEndNow === false) {
+                        isAtEndRef.current = false;
+                        setIsPinned(false);
+                        modeRef.current = 'free-scrolling';
+                        liveFollowGenerationRef.current = null;
+                        scheduleShowScrollButton();
+                        queueSave();
+                    }
+                    return;
+                }
+                {
+                    // A streaming session keeps its live edge in view, so the
+                    // end is re-asserted once on settle.
                     // Not scrollToEnd: the list's end offset comes from the
                     // total content length, which still carries pre-wrap row
                     // sizes (and any reserved anchored end space) right after a
@@ -616,7 +652,7 @@ export const useChatTimelineScroll = ({
             observer.disconnect();
             if (quietTimer !== null) clearTimeout(quietTimer);
         };
-    }, [scrollNode]);
+    }, [queueSave, scheduleShowScrollButton, scrollNode]);
 
     // Keep the live edge in view after content growth. Within a viewport of
     // the end the remaining distance is glided so a revealed block and the
@@ -633,6 +669,10 @@ export const useChatTimelineScroll = ({
         const end = node.scrollHeight - node.clientHeight;
         const distance = end - node.scrollTop;
         if (distance <= 1) return;
+        if (!sessionIsWorkingRef.current) {
+            node.scrollTop = end;
+            return;
+        }
         if (distance > node.clientHeight) {
             node.scrollTop = end - node.clientHeight;
         }
@@ -863,6 +903,65 @@ export const useChatTimelineScroll = ({
             scrollNode.removeEventListener('scroll', handleScroll);
         };
     }, [queueSave, realContentOverflowsViewport, scrollNode]);
+
+    // ── entry pin ───────────────────────────────────────────────────────────
+    // An opened session is shown once, already at its end: the reveal gate is
+    // held until the viewport sits on the end, and the pin is one instant
+    // write. The list lays its rows out before the first frame, so this
+    // resolves within a frame; the gate's own cap bounds the wait.
+    React.useLayoutEffect(() => {
+        if (!currentSessionKey || !scrollNode) return;
+        const releaseReveal = revealGate?.hold() ?? null;
+        let frame: number | null = null;
+        const settle = () => {
+            frame = null;
+            if (!userOwnsScrollRef.current && modeRef.current === 'following-end') {
+                const end = scrollNode.scrollHeight - scrollNode.clientHeight;
+                if (end - scrollNode.scrollTop > 1) scrollNode.scrollTop = end;
+            }
+            releaseReveal?.();
+        };
+        frame = requestAnimationFrame(settle);
+        return () => {
+            if (frame !== null) cancelAnimationFrame(frame);
+            releaseReveal?.();
+        };
+    }, [currentSessionKey, revealGate, scrollNode]);
+
+    // ── pinned end ──────────────────────────────────────────────────────────
+    // "At the end" is an invariant, not a one-time scroll: while the reader
+    // sits on the end of a session that is not producing output, any growth
+    // of the content (a footer that decides to render, a row re-measured)
+    // keeps the end in view with one instant write. Output growth belongs to
+    // followEnd, which glides.
+    React.useEffect(() => {
+        if (!scrollNode || typeof MutationObserver === 'undefined') return;
+        const content = scrollNode.firstElementChild;
+        if (!content) return;
+        const pin = () => {
+            if (sessionIsWorkingRef.current) return;
+            // A width resize re-wraps every row; pinning against each mutation
+            // scrolls the idle reader around. The resize settle handler above
+            // decides whether the pin survives the resize.
+            if (widthResizingRef.current) return;
+            if (userOwnsScrollRef.current || !isAtEndRef.current || modeRef.current !== 'following-end') return;
+            const end = scrollNode.scrollHeight - scrollNode.clientHeight;
+            if (end - scrollNode.scrollTop > 1) scrollNode.scrollTop = end;
+        };
+        // A MutationObserver runs as a microtask right after the list writes
+        // its layout (row positions, container height), before the frame is
+        // painted, so the pin lands in the same frame as the growth. A
+        // ResizeObserver would only see the container a rendering step later
+        // and let one frame paint with the end out of view.
+        const mutations = new MutationObserver(pin);
+        mutations.observe(content, { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] });
+        const resizes = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(pin);
+        resizes?.observe(content);
+        return () => {
+            mutations.disconnect();
+            resizes?.disconnect();
+        };
+    }, [scrollNode]);
 
     // ── session lifecycle ───────────────────────────────────────────────────
     const lastSessionKeyRef = React.useRef<string | null>(null);

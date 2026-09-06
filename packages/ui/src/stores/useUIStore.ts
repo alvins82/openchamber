@@ -7,14 +7,16 @@ import type { ShortcutCombo } from '@/lib/shortcuts';
 import type { DraftStarterRef } from '@/lib/draftStarters';
 import { DEFAULT_MONO_FONT, DEFAULT_UI_FONT, type MonoFontOption, type UiFontOption } from '@/lib/fontOptions';
 import { getStoredMobileKeyboardMode, type MobileKeyboardMode } from '@/lib/mobileKeyboardMode';
-import type { TerminalShell } from '@/lib/api/types';
+import type { LinearIssueListAssignee, LinearIssueListPriority, LinearIssueListStatus, TerminalShell } from '@/lib/api/types';
 import type { ProjectRef } from '@/lib/projectContextApi';
+import { directoryMayHaveActiveProjectAction, useTerminalStore } from '@/stores/useTerminalStore';
 import { useFilesViewTabsStore } from './useFilesViewTabsStore';
 import { isWindowsArm64 } from '@/lib/platform';
 import { isVSCodeRuntime } from '@/lib/desktop';
+import { getRuntimeKey, isTransientRuntimeKey } from '@/lib/runtime-switch';
 
 export type PendingDiffScope = 'working' | 'staged' | 'turn' | 'branch';
-export type ContextPanelMode = 'diff' | 'walkthrough' | 'file' | 'context' | 'plan' | 'chat' | 'browser' | 'git' | 'pr' | 'notes' | 'terminal';
+export type ContextPanelMode = 'diff' | 'walkthrough' | 'file' | 'context' | 'plan' | 'chat' | 'browser' | 'git' | 'pr' | 'linear' | 'notes' | 'terminal';
 export type MermaidRenderingMode = 'svg' | 'ascii';
 export type UserMessageRenderingMode = 'markdown' | 'plain';
 export type ChatRenderMode = 'sorted' | 'live';
@@ -40,10 +42,74 @@ function normalizeFileEditorKeymap(value: unknown): FileEditorKeymap {
   return value === 'vim' ? 'vim' : 'default';
 }
 
+export const LINEAR_ISSUE_LIST_ALL_TEAMS = 'all';
+
+function sanitizeLinearIssueListStatus(value: unknown): LinearIssueListStatus {
+  return value === 'all'
+    || value === 'backlog'
+    || value === 'todo'
+    || value === 'started'
+    || value === 'inReview'
+    || value === 'completed'
+    || value === 'canceled'
+    || value === 'duplicate'
+    ? value
+    : 'all';
+}
+
+function sanitizeLinearIssueListAssignee(value: unknown): LinearIssueListAssignee {
+  return value === 'me' || value === 'any' ? value : 'any';
+}
+
+function sanitizeLinearIssueListTeamId(value: unknown): string {
+  if (typeof value !== 'string') return LINEAR_ISSUE_LIST_ALL_TEAMS;
+  const teamId = value.trim();
+  return teamId || LINEAR_ISSUE_LIST_ALL_TEAMS;
+}
+
+/**
+ * Store the team filter under the connected instance, dropping the entry when
+ * it falls back to all teams so the map does not accumulate defaults. Transient
+ * keys (uninitialised, mobile-disconnected) name no instance and are not written.
+ */
+function writeLinearTeamIdForRuntime(
+  entries: Record<string, string>,
+  teamId: string,
+): Record<string, string> {
+  const runtimeKey = getRuntimeKey();
+  if (isTransientRuntimeKey(runtimeKey)) return entries;
+  const next = { ...entries };
+  if (teamId === LINEAR_ISSUE_LIST_ALL_TEAMS) {
+    delete next[runtimeKey];
+  } else {
+    next[runtimeKey] = teamId;
+  }
+  return next;
+}
+
+function sanitizeLinearIssueListTeamIdByRuntime(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const entries: Record<string, string> = {};
+  // SAFETY: guarded above as a non-array object; every value is re-checked below.
+  for (const [runtimeKey, teamId] of Object.entries(value as Record<string, unknown>)) {
+    if (!runtimeKey.trim() || typeof teamId !== 'string') continue;
+    const sanitized = sanitizeLinearIssueListTeamId(teamId);
+    if (sanitized !== LINEAR_ISSUE_LIST_ALL_TEAMS) entries[runtimeKey] = sanitized;
+  }
+  return entries;
+}
+
+function sanitizeLinearIssueListPriority(value: unknown): LinearIssueListPriority {
+  return value === 'none' || value === 'urgent' || value === 'high' || value === 'medium' || value === 'low' || value === 'all'
+    ? value
+    : 'all';
+}
+
 type ContextPanelTab = {
   id: string;
   mode: ContextPanelMode;
   targetPath: string | null;
+  targetDirectory: string | null;
   /** Saved project plan this tab shows, for `plan` tabs opened from the notes
       panel. Project plans are addressed by id because their markdown is
       server-owned and has no client-visible path. */
@@ -64,6 +130,7 @@ type ContextPanelTab = {
 type ContextPanelTabDescriptor = {
   mode: ContextPanelMode;
   targetPath?: string | null;
+  targetDirectory?: string | null;
   projectPlanId?: string | null;
   projectPlanRef?: ProjectRef | null;
   dedupeKey?: string | null;
@@ -188,6 +255,15 @@ const normalizeContextTargetPath = (value: string | null | undefined): string | 
   return trimmed.replace(/\\/g, '/');
 };
 
+const normalizeContextTargetDirectory = (value: string | null | undefined): string | null => {
+  const normalizedPath = normalizeContextTargetPath(value);
+  if (!normalizedPath) {
+    return null;
+  }
+
+  return normalizeContextPanelDirectoryKey(normalizedPath) || null;
+};
+
 const normalizeContextTabLabel = (value: string | null | undefined): string | null => {
   if (typeof value !== 'string') {
     return null;
@@ -256,6 +332,9 @@ const buildContextPanelTabID = (mode: ContextPanelMode, dedupeKey: string): stri
 
 const createContextPanelTab = (descriptor: ContextPanelTabDescriptor): ContextPanelTab => {
   const normalizedTargetPath = normalizeContextTargetPath(descriptor.targetPath);
+  const normalizedTargetDirectory = descriptor.mode === 'terminal'
+    ? normalizeContextTargetDirectory(descriptor.targetDirectory)
+    : null;
   const dedupeKey = normalizeContextPanelTabDedupeKey(
     descriptor.mode,
     normalizedTargetPath,
@@ -265,6 +344,7 @@ const createContextPanelTab = (descriptor: ContextPanelTabDescriptor): ContextPa
     id: buildContextPanelTabID(descriptor.mode, dedupeKey),
     mode: descriptor.mode,
     targetPath: normalizedTargetPath,
+    targetDirectory: normalizedTargetDirectory,
     projectPlanId: typeof descriptor.projectPlanId === 'string' && descriptor.projectPlanId.trim()
       ? descriptor.projectPlanId.trim()
       : null,
@@ -328,6 +408,7 @@ const sanitizeContextPanelTabs = (tabs: unknown): ContextPanelTab[] => {
     const candidate = entry as {
       mode?: unknown;
       targetPath?: unknown;
+      targetDirectory?: string | null;
       projectPlanId?: unknown;
       projectPlanRef?: unknown;
       dedupeKey?: unknown;
@@ -342,7 +423,7 @@ const sanitizeContextPanelTabs = (tabs: unknown): ContextPanelTab[] => {
     // Legacy 'preview' tabs are converted to 'browser' by the v14 migration;
     // anything still carrying an unknown mode here is discarded rather than
     // resurrected into a tab the panel cannot render.
-    if (candidate.mode !== 'diff' && candidate.mode !== 'walkthrough' && candidate.mode !== 'file' && candidate.mode !== 'context' && candidate.mode !== 'plan' && candidate.mode !== 'chat' && candidate.mode !== 'browser' && candidate.mode !== 'git' && candidate.mode !== 'pr' && candidate.mode !== 'notes' && candidate.mode !== 'terminal') {
+    if (candidate.mode !== 'diff' && candidate.mode !== 'walkthrough' && candidate.mode !== 'file' && candidate.mode !== 'context' && candidate.mode !== 'plan' && candidate.mode !== 'chat' && candidate.mode !== 'browser' && candidate.mode !== 'git' && candidate.mode !== 'pr' && candidate.mode !== 'linear' && candidate.mode !== 'notes' && candidate.mode !== 'terminal') {
       continue;
     }
 
@@ -353,6 +434,9 @@ const sanitizeContextPanelTabs = (tabs: unknown): ContextPanelTab[] => {
     }
 
     const targetPath = normalizeContextTargetPath(typeof candidate.targetPath === 'string' ? candidate.targetPath : null);
+    const targetDirectory = candidate.mode === 'terminal'
+      ? normalizeContextTargetDirectory(candidate.targetDirectory)
+      : null;
     const projectPlanId = typeof candidate.projectPlanId === 'string' && candidate.projectPlanId.trim()
       ? candidate.projectPlanId.trim()
       : null;
@@ -381,6 +465,7 @@ const sanitizeContextPanelTabs = (tabs: unknown): ContextPanelTab[] => {
       id,
       mode: candidate.mode,
       targetPath,
+      targetDirectory,
       projectPlanId,
       projectPlanRef,
       dedupeKey,
@@ -447,22 +532,23 @@ const upsertContextPanelTab = (
   const existingIndex = baseTabs.findIndex((tab) => tab.id === nextTab.id);
   const tabs = existingIndex === -1
     ? [...baseTabs, nextTab]
-     : baseTabs.map((tab, index) => (index === existingIndex
-       ? {
-           ...tab,
-           mode: nextTab.mode,
-           targetPath: nextTab.targetPath || tab.targetPath,
-           projectPlanId: nextTab.projectPlanId ?? tab.projectPlanId,
-           projectPlanRef: nextTab.projectPlanRef ?? tab.projectPlanRef,
-           dedupeKey: nextTab.dedupeKey,
-           label: nextTab.label,
-           sessionTitleFallback: nextTab.sessionTitleFallback || tab.sessionTitleFallback,
-           stagedDiff: nextTab.stagedDiff,
-           diffScope: nextTab.diffScope,
-           readOnly: nextTab.readOnly,
-           touchedAt: Date.now(),
-         }
-       : tab));
+    : baseTabs.map((tab, index) => (index === existingIndex
+      ? {
+          ...tab,
+          mode: nextTab.mode,
+          targetPath: nextTab.targetPath || tab.targetPath,
+          targetDirectory: nextTab.targetDirectory,
+          projectPlanId: nextTab.projectPlanId ?? tab.projectPlanId,
+          projectPlanRef: nextTab.projectPlanRef ?? tab.projectPlanRef,
+          dedupeKey: nextTab.dedupeKey,
+          label: nextTab.label,
+          sessionTitleFallback: nextTab.sessionTitleFallback || tab.sessionTitleFallback,
+          stagedDiff: nextTab.stagedDiff,
+          diffScope: nextTab.diffScope,
+          readOnly: nextTab.readOnly,
+          touchedAt: Date.now(),
+        }
+      : tab));
 
   // A background upsert (an agent working a page) keeps the panel exactly as
   // the user left it: closed stays closed, and whatever tab they were on
@@ -588,6 +674,7 @@ const sanitizeContextPanelByDirectory = (
       touchedAt?: unknown;
       mode?: unknown;
       targetPath?: unknown;
+      targetDirectory?: string | null;
       dedupeKey?: unknown;
       label?: unknown;
     };
@@ -599,10 +686,11 @@ const sanitizeContextPanelByDirectory = (
     // no owner and cannot be migrated into an openable saved-plan tab — that
     // combination is dropped by sanitize above. A generic filesystem plan tab
     // (no plan id) revives fine from the descriptor alone.
-    if (tabs.length === 0 && (candidate.mode === 'diff' || candidate.mode === 'file' || candidate.mode === 'context' || candidate.mode === 'plan' || candidate.mode === 'chat')) {
+    if (tabs.length === 0 && (candidate.mode === 'diff' || candidate.mode === 'file' || candidate.mode === 'context' || candidate.mode === 'plan' || candidate.mode === 'chat' || candidate.mode === 'terminal')) {
       tabs = [createContextPanelTab({
         mode: candidate.mode,
         targetPath: typeof candidate.targetPath === 'string' ? candidate.targetPath : null,
+        targetDirectory: candidate.targetDirectory,
         dedupeKey: typeof candidate.dedupeKey === 'string' ? candidate.dedupeKey : null,
         label: typeof candidate.label === 'string' ? candidate.label : null,
       })];
@@ -618,7 +706,7 @@ const sanitizeContextPanelByDirectory = (
     if (candidate.widthByMode && typeof candidate.widthByMode === 'object') {
       for (const [mode, value] of Object.entries(candidate.widthByMode as Record<string, unknown>)) {
         if (
-          (mode === 'diff' || mode === 'file' || mode === 'context' || mode === 'plan' || mode === 'chat' || mode === 'browser' || mode === 'git' || mode === 'pr' || mode === 'notes' || mode === 'terminal')
+          (mode === 'diff' || mode === 'file' || mode === 'context' || mode === 'plan' || mode === 'chat' || mode === 'browser' || mode === 'git' || mode === 'pr' || mode === 'linear' || mode === 'notes' || mode === 'terminal')
           && typeof value === 'number'
           && Number.isFinite(value)
         ) {
@@ -787,6 +875,22 @@ interface UIStore {
   /** Width of the walkthrough table of contents, in pixels. */
   walkthroughTocWidth: number;
   gitChangesViewMode: 'flat' | 'tree';
+  toolJsonViewMode: 'summary' | 'formatted' | 'raw';
+  linearIssueListStatus: LinearIssueListStatus;
+  linearIssueListAssignee: LinearIssueListAssignee;
+  /**
+   * Team filter for the instance currently connected. A Linear team belongs to
+   * one workspace, and each OpenChamber instance has its own Linear login, so
+   * this is derived from `linearIssueListTeamIdByRuntime` rather than persisted
+   * on its own — a team id carried across a switch filters the new instance's
+   * list down to nothing.
+   */
+  linearIssueListTeamId: string;
+  /** Team filter per instance, keyed the same way every runtime-scoped cache is. */
+  linearIssueListTeamIdByRuntime: Record<string, string>;
+  linearIssueListPriority: LinearIssueListPriority;
+  /** One-shot identifier for opening a Linear issue in the rail panel. Not persisted. */
+  linearIssueFocus: string | null;
   isTimelineDialogOpen: boolean;
   isPromptNavigatorPanelOpen: boolean;
   isImagePreviewOpen: boolean;
@@ -839,6 +943,8 @@ interface UIStore {
   projectContextTab: string;
   inputSpellcheckEnabled: boolean;
   largeTextPasteBehavior: LargeTextPasteBehavior;
+  enterToSend: boolean;
+  enterToSendConfigured: boolean;
   wideChatLayoutEnabled: boolean;
   codeBlockLineWrap: boolean;
   showToolFileIcons: boolean;
@@ -983,6 +1089,15 @@ interface UIStore {
   setDiffWrapLines: (wrap: boolean) => void;
   setWalkthroughTocWidth: (width: number) => void;
   setGitChangesViewMode: (mode: 'flat' | 'tree') => void;
+  setToolJsonViewMode: (mode: 'summary' | 'formatted' | 'raw') => void;
+  setLinearIssueListStatus: (status: LinearIssueListStatus) => void;
+  setLinearIssueListAssignee: (assignee: LinearIssueListAssignee) => void;
+  setLinearIssueListTeamId: (teamId: string) => void;
+  /** Re-read the team filter for the instance now connected. */
+  applyLinearIssueListFiltersForRuntime: () => void;
+  setLinearIssueListPriority: (priority: LinearIssueListPriority) => void;
+  resetLinearIssueListFilters: () => void;
+  setLinearIssueFocus: (identifier: string | null) => void;
   setMultiRunLauncherOpen: (open: boolean) => void;
   setTimelineDialogOpen: (open: boolean) => void;
   setPromptNavigatorPanelOpen: (open: boolean) => void;
@@ -1015,6 +1130,8 @@ interface UIStore {
   setProjectContextTab: (value: string) => void;
   setInputSpellcheckEnabled: (value: boolean) => void;
   setLargeTextPasteBehavior: (value: LargeTextPasteBehavior) => void;
+  setEnterToSend: (value: boolean) => void;
+  setEnterToSendConfigured: (value: boolean) => void;
   setWideChatLayoutEnabled: (value: boolean) => void;
   setCodeBlockLineWrap: (value: boolean) => void;
   setShowToolFileIcons: (value: boolean) => void;
@@ -1140,6 +1257,13 @@ export const useUIStore = create<UIStore>()(
         diffWrapLines: false,
         walkthroughTocWidth: 224,
         gitChangesViewMode: 'flat',
+        toolJsonViewMode: 'summary',
+        linearIssueListStatus: 'all',
+        linearIssueListAssignee: 'any',
+        linearIssueListTeamId: LINEAR_ISSUE_LIST_ALL_TEAMS,
+        linearIssueListTeamIdByRuntime: {},
+        linearIssueListPriority: 'all',
+        linearIssueFocus: null,
         isTimelineDialogOpen: false,
         isPromptNavigatorPanelOpen: false,
         isImagePreviewOpen: false,
@@ -1178,6 +1302,8 @@ export const useUIStore = create<UIStore>()(
         projectContextTab: 'notes',
         inputSpellcheckEnabled: false,
         largeTextPasteBehavior: DEFAULT_LARGE_TEXT_PASTE_BEHAVIOR,
+        enterToSend: false,
+        enterToSendConfigured: false,
         wideChatLayoutEnabled: false,
         codeBlockLineWrap: true,
         showToolFileIcons: true,
@@ -1279,14 +1405,29 @@ export const useUIStore = create<UIStore>()(
           const panelState = state.contextPanelByDirectory[normalizedDirectory];
           const tabs = panelState?.tabs ?? [];
           const activeTab = tabs.find((tab) => tab.id === panelState?.activeTabId) ?? null;
+          const clearTerminalTarget = () => {
+            if (mode === 'terminal') {
+              const terminalTab = tabs.find((tab) => tab.mode === 'terminal') ?? null;
+              const targetDirectory = terminalTab?.targetDirectory ?? null;
+              if (targetDirectory) {
+                const targetState = useTerminalStore.getState().getDirectoryState(targetDirectory);
+                if (directoryMayHaveActiveProjectAction(targetState)) {
+                  return;
+                }
+              }
+              state.openContextPanelTab(normalizedDirectory, { mode: 'terminal', targetDirectory: null }, { reveal: false });
+            }
+          };
 
           if (panelState?.isOpen && activeTab?.mode === mode) {
+            clearTerminalTarget();
             state.closeContextPanel(normalizedDirectory);
             return;
           }
 
           const tabsOfMode = tabs.filter((tab) => tab.mode === mode);
           if (tabsOfMode.length > 0) {
+            clearTerminalTarget();
             // `>=` so equal timestamps (same-millisecond opens) resolve to the
             // later tab in insertion order.
             const mostRecent = tabsOfMode.reduce((best, tab) => (tab.touchedAt >= best.touchedAt ? tab : best));
@@ -1310,12 +1451,21 @@ export const useUIStore = create<UIStore>()(
             return;
           }
 
+          const nextTab = tab.mode === 'terminal'
+            ? {
+                ...tab,
+                targetDirectory: normalizeContextTargetDirectory(tab.targetDirectory) === normalizedDirectory
+                  ? null
+                  : normalizeContextTargetDirectory(tab.targetDirectory),
+              }
+            : tab;
+
           set((state) => {
             const prev = state.contextPanelByDirectory[normalizedDirectory];
             const current = touchContextPanelState(prev);
             const byDirectory = {
               ...state.contextPanelByDirectory,
-              [normalizedDirectory]: upsertContextPanelTab(current, tab, options),
+              [normalizedDirectory]: upsertContextPanelTab(current, nextTab, options),
             };
 
             return { contextPanelByDirectory: clampContextPanelRoots(byDirectory, 20) };
@@ -2055,7 +2205,58 @@ export const useUIStore = create<UIStore>()(
         setGitChangesViewMode: (mode) => {
           set({ gitChangesViewMode: mode });
         },
- 
+
+        setToolJsonViewMode: (mode) => {
+          set({ toolJsonViewMode: mode });
+        },
+
+        setLinearIssueListStatus: (status) => {
+          set({ linearIssueListStatus: sanitizeLinearIssueListStatus(status) });
+        },
+
+        setLinearIssueListAssignee: (assignee) => {
+          set({ linearIssueListAssignee: sanitizeLinearIssueListAssignee(assignee) });
+        },
+
+        setLinearIssueListTeamId: (teamId) => {
+          const sanitized = sanitizeLinearIssueListTeamId(teamId);
+          set((state) => ({
+            linearIssueListTeamId: sanitized,
+            linearIssueListTeamIdByRuntime: writeLinearTeamIdForRuntime(state.linearIssueListTeamIdByRuntime, sanitized),
+          }));
+        },
+
+        applyLinearIssueListFiltersForRuntime: () => {
+          const runtimeKey = getRuntimeKey();
+          set((state) => ({
+            linearIssueListTeamId: isTransientRuntimeKey(runtimeKey)
+              ? LINEAR_ISSUE_LIST_ALL_TEAMS
+              : state.linearIssueListTeamIdByRuntime[runtimeKey] ?? LINEAR_ISSUE_LIST_ALL_TEAMS,
+          }));
+        },
+
+        setLinearIssueListPriority: (priority) => {
+          set({ linearIssueListPriority: sanitizeLinearIssueListPriority(priority) });
+        },
+
+        resetLinearIssueListFilters: () => {
+          set((state) => ({
+            linearIssueListStatus: 'all',
+            linearIssueListAssignee: 'any',
+            linearIssueListTeamId: LINEAR_ISSUE_LIST_ALL_TEAMS,
+            linearIssueListTeamIdByRuntime: writeLinearTeamIdForRuntime(
+              state.linearIssueListTeamIdByRuntime,
+              LINEAR_ISSUE_LIST_ALL_TEAMS,
+            ),
+            linearIssueListPriority: 'all',
+          }));
+        },
+
+        setLinearIssueFocus: (identifier) => {
+          const trimmed = identifier?.trim() ?? '';
+          set({ linearIssueFocus: trimmed || null });
+        },
+
         setInputBarOffset: (offset) => {
           set({ inputBarOffset: offset });
         },
@@ -2405,6 +2606,12 @@ export const useUIStore = create<UIStore>()(
         setLargeTextPasteBehavior: (value) => {
           set({ largeTextPasteBehavior: normalizeLargeTextPasteBehavior(value) });
         },
+        setEnterToSend: (value) => {
+          set({ enterToSend: value });
+        },
+        setEnterToSendConfigured: (value) => {
+          set({ enterToSendConfigured: value });
+        },
         setWideChatLayoutEnabled: (value) => {
           set({ wideChatLayoutEnabled: value });
         },
@@ -2723,8 +2930,23 @@ export const useUIStore = create<UIStore>()(
             }
           }
 
+          state.linearIssueListStatus = sanitizeLinearIssueListStatus(state.linearIssueListStatus);
+          state.linearIssueListAssignee = sanitizeLinearIssueListAssignee(state.linearIssueListAssignee);
+          // v18 -> v19: the team filter became per instance. The legacy flat
+          // value names a team in one workspace with nothing to say which
+          // instance it came from, so it is dropped rather than guessed at.
+          delete state.linearIssueListTeamId;
+          state.linearIssueListTeamIdByRuntime = sanitizeLinearIssueListTeamIdByRuntime(state.linearIssueListTeamIdByRuntime);
+          state.linearIssueListPriority = sanitizeLinearIssueListPriority(state.linearIssueListPriority);
+
           state.fileEditorKeymap = normalizeFileEditorKeymap(state.fileEditorKeymap);
           state.largeTextPasteBehavior = normalizeLargeTextPasteBehavior(state.largeTextPasteBehavior);
+
+          if (state.toolJsonViewMode !== 'summary'
+            && state.toolJsonViewMode !== 'formatted'
+            && state.toolJsonViewMode !== 'raw') {
+            state.toolJsonViewMode = 'summary';
+          }
 
           if (typeof state.autoSaveEnabled !== 'boolean') {
             state.autoSaveEnabled = true;
@@ -2800,6 +3022,11 @@ export const useUIStore = create<UIStore>()(
           diffWrapLines: state.diffWrapLines,
           walkthroughTocWidth: state.walkthroughTocWidth,
           gitChangesViewMode: state.gitChangesViewMode,
+          toolJsonViewMode: state.toolJsonViewMode,
+          linearIssueListStatus: state.linearIssueListStatus,
+          linearIssueListAssignee: state.linearIssueListAssignee,
+          linearIssueListTeamIdByRuntime: state.linearIssueListTeamIdByRuntime,
+          linearIssueListPriority: state.linearIssueListPriority,
           nativeNotificationsEnabled: state.nativeNotificationsEnabled,
           notificationMode: state.notificationMode,
           showTerminalQuickKeysOnDesktop: state.showTerminalQuickKeysOnDesktop,
@@ -2823,6 +3050,8 @@ export const useUIStore = create<UIStore>()(
           projectContextSidebarWidth: state.projectContextSidebarWidth,
           inputSpellcheckEnabled: state.inputSpellcheckEnabled,
           largeTextPasteBehavior: state.largeTextPasteBehavior,
+          enterToSend: state.enterToSend,
+          enterToSendConfigured: state.enterToSendConfigured,
           wideChatLayoutEnabled: state.wideChatLayoutEnabled,
           codeBlockLineWrap: state.codeBlockLineWrap,
           showToolFileIcons: state.showToolFileIcons,
