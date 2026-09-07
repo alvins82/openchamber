@@ -11,7 +11,6 @@ import { MarkdownRenderer } from '../../MarkdownRenderer';
 import { useStreamingTextThrottle } from '../../hooks/useStreamingTextThrottle';
 import { commitStreamedText } from '../../lib/streamTextCommit';
 import type { StreamPhase } from '../types';
-import { useReasoningScrollFollow } from './useReasoningScrollFollow';
 
 const TOOL_ROW_TEXT_CLASS = '!text-[length:var(--text-meta)] !leading-5 sm:!leading-6 tracking-normal';
 const TOOL_ROW_TITLE_CLASS = cn('typography-meta font-medium', TOOL_ROW_TEXT_CLASS);
@@ -122,6 +121,59 @@ export const ReasoningTimelineBlock: React.FC<ReasoningTimelineBlockProps> = ({
     const contentRef = React.useRef<HTMLDivElement>(null);
     const contentAnimationRef = React.useRef<AnimationPlaybackControls | null>(null);
     const contentMountedRef = React.useRef(false);
+
+    // The thinking body lives in a capped scroll box in every state. While it
+    // streams, the box follows its own end so the newest thought stays in
+    // view without growing the timeline; a wheel or drag upward inside the
+    // box hands the box to the reader, and returning to its end re-arms the
+    // follow. The chat's own end-follow is unaffected: the box keeps a fixed
+    // height once capped, so the timeline stops growing underneath it, and an
+    // upward wheel over the box scrolls the box first (it is a nested
+    // scroller) and only reaches the chat once the box sits at its top.
+    const scrollBoxRef = React.useRef<HTMLElement | null>(null);
+    const followBoxEndRef = React.useRef(true);
+    const touchStartYRef = React.useRef<number | null>(null);
+    const releaseBoxFollow = React.useCallback(() => {
+        followBoxEndRef.current = false;
+    }, []);
+    const handleBoxWheel = React.useCallback((event: React.WheelEvent<HTMLElement>) => {
+        if (event.deltaY < 0) releaseBoxFollow();
+    }, [releaseBoxFollow]);
+    const handleBoxTouchStart = React.useCallback((event: React.TouchEvent<HTMLElement>) => {
+        touchStartYRef.current = event.touches[0]?.clientY ?? null;
+    }, []);
+    const handleBoxTouchMove = React.useCallback((event: React.TouchEvent<HTMLElement>) => {
+        const startY = touchStartYRef.current;
+        const touch = event.touches[0];
+        if (startY === null || !touch) return;
+        // A downward finger drags the content up: the reader wants history.
+        if (touch.clientY > startY + 4) releaseBoxFollow();
+    }, [releaseBoxFollow]);
+    const handleBoxScroll = React.useCallback((event: React.UIEvent<HTMLElement>) => {
+        const node = event.currentTarget;
+        const distanceToEnd = node.scrollHeight - node.clientHeight - node.scrollTop;
+        followBoxEndRef.current = distanceToEnd <= 2;
+    }, []);
+
+    React.useEffect(() => {
+        if (!isStreaming) return;
+        followBoxEndRef.current = true;
+        const node = scrollBoxRef.current;
+        if (!node || !globalThis.ResizeObserver) return;
+        const content = node.firstElementChild;
+        if (!content) return;
+        const follow = () => {
+            if (!followBoxEndRef.current) return;
+            const end = node.scrollHeight - node.clientHeight;
+            if (end - node.scrollTop > 1) node.scrollTop = end;
+        };
+        // Growth lands asynchronously (markdown commits off the render pass),
+        // so the content box is observed rather than the text prop.
+        const observer = new ResizeObserver(follow);
+        observer.observe(content);
+        follow();
+        return () => observer.disconnect();
+    }, [isStreaming, shouldRenderExpandedContent]);
 
     const summary = React.useMemo(() => getReasoningSummary(text), [text]);
     const toggleAriaLabel = isExpanded
@@ -262,15 +314,6 @@ export const ReasoningTimelineBlock: React.FC<ReasoningTimelineBlockProps> = ({
         };
     }, []);
 
-    const scrollRef = React.useRef<HTMLElement | null>(null);
-    const reasoningContentRef = React.useRef<HTMLDivElement | null>(null);
-    const { handleWheelCapture, handleScroll } = useReasoningScrollFollow(
-        scrollRef,
-        reasoningContentRef,
-        isStreaming,
-        text,
-    );
-
     // While genuinely streaming, the busy header must appear as soon as
     // reasoning starts even before the block-level reveal (commitStreamedText)
     // has committed a first complete line — otherwise "Thinking…" never shows
@@ -322,7 +365,7 @@ export const ReasoningTimelineBlock: React.FC<ReasoningTimelineBlockProps> = ({
                                 isExpanded && 'opacity-0',
                                 !isExpanded && 'group-hover/tool:opacity-0',
                             )}
-                            style={{ color: 'var(--tools-description)' }}
+                            style={{ color: 'var(--tools-icon)' }}
                         >
                             <Icon name="brain-ai-3" className="h-3.5 w-3.5" />
                         </div>
@@ -332,28 +375,28 @@ export const ReasoningTimelineBlock: React.FC<ReasoningTimelineBlockProps> = ({
                                 isExpanded && 'opacity-100',
                                 !isExpanded && 'opacity-0 group-hover/tool:opacity-100',
                             )}
-                            style={{ color: 'var(--tools-description)' }}
+                            style={{ color: 'var(--tools-icon)' }}
                         >
                             {isExpanded ? <Icon name="arrow-down-s" className="h-3.5 w-3.5" /> : <Icon name="arrow-right-s" className="h-3.5 w-3.5" />}
                         </div>
                     </div>
 
                     {isStreaming ? (
-                        <span className={cn('flex items-center gap-1', TOOL_ROW_TITLE_CLASS)} style={{ color: 'var(--tools-description)' }}>
+                        <span className={cn('flex items-center gap-1', TOOL_ROW_TITLE_CLASS)} style={{ color: 'var(--tools-title)' }}>
                             <span>{t(variant === 'justification' ? 'chat.reasoningTrace.justification' : 'chat.reasoningTrace.thinking')}</span>
                             <BusyDots />
                         </span>
                     ) : isExpanded ? (
                         <span
                             className={TOOL_ROW_TITLE_CLASS}
-                            style={{ color: 'var(--tools-description)' }}
+                            style={{ color: 'var(--tools-title)' }}
                         >
                             {t(variant === 'justification' ? 'chat.reasoningTrace.justification' : 'chat.reasoningTrace.thinking')}
                         </span>
                     ) : (
                         <span
                             className={TOOL_ROW_TITLE_CLASS}
-                            style={{ color: 'var(--tools-description)' }}
+                            style={{ color: 'var(--tools-title)' }}
                         >
                             {t(variant === 'justification' ? 'chat.reasoningTrace.justification' : 'chat.reasoningTrace.thinking')}
                         </span>
@@ -400,20 +443,20 @@ export const ReasoningTimelineBlock: React.FC<ReasoningTimelineBlockProps> = ({
                             style={{ backgroundColor: 'var(--tools-border)' }}
                         />
                         <ScrollableOverlay
-                            ref={scrollRef}
+                            ref={scrollBoxRef}
                             as="div"
                             outerClassName="max-h-80"
                             className="p-0"
-                            data-scrollable="true"
                             useScrollShadow
                             scrollShadowSize={36}
                             userIntentOnly
-                            onWheelCapture={handleWheelCapture}
-                            onScroll={handleScroll}
+                            data-scrollable="true"
+                            onWheel={handleBoxWheel}
+                            onTouchStart={handleBoxTouchStart}
+                            onTouchMove={handleBoxTouchMove}
+                            onScroll={handleBoxScroll}
                         >
-                            <div ref={reasoningContentRef}>
-                                {reasoningBody}
-                            </div>
+                            <div>{reasoningBody}</div>
                         </ScrollableOverlay>
                     </div>
                 </div>

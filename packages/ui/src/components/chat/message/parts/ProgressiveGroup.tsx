@@ -1041,7 +1041,7 @@ const ProgressiveGroup: React.FC<ProgressiveGroupProps> = ({
     if (!showHeader) {
         return (
             <FadeInOnReveal>
-                <div className="mt-1 mb-2 space-y-1.5">{renderedRows}</div>
+                <div className="mt-1 mb-2">{renderedRows}</div>
             </FadeInOnReveal>
         );
     }
@@ -1084,7 +1084,10 @@ const ProgressiveGroup: React.FC<ProgressiveGroupProps> = ({
                                 +{previewHiddenCount} more...
                             </button>
                         ) : null}
-                        <div className="space-y-1.5">{renderedRows}</div>
+                        {/* No gap between rows: each row carries its own padding, and
+                            the live timeline stacks the same rows with nothing between
+                            them, so the sorted view keeps the identical rhythm. */}
+                        <div>{renderedRows}</div>
                     </div>
                 ) : null}
             </div>
