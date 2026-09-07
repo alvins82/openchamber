@@ -63,10 +63,6 @@ Use this doc when you ask an agent to change tool/header/description behavior.
     completed row owns the higher-level collapse affordance for intermediate
     assistant text, Thinking, and tool activity.
 
-- `useReasoningScrollFollow.ts`
-  - Keeps live reasoning pinned to the bottom while the rendered body grows,
-    with an explicit user-scroll opt-out.
-
 - `JustificationBlock.tsx`
   - Justification block wrapper over `ReasoningTimelineBlock`.
 
