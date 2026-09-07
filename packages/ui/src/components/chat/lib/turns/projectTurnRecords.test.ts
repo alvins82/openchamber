@@ -55,6 +55,21 @@ describe('projectTurnRecords', () => {
         expect(projection.turns[0]?.summary.sourcePartId).toBe('final-text');
     });
 
+    test('uses the raw part position for an id-less summary source', () => {
+        const user = createMessageEntry({ id: 'u1', role: 'user', createdAt: 1 });
+        const assistant = createMessageEntry({ id: 'a1', role: 'assistant', parentID: 'u1', createdAt: 2 });
+        Object.assign(assistant.info, { finish: 'stop' });
+        // SAFETY: These fixtures supply the text-part fields used by the projection under test.
+        assistant.parts = [
+            { type: 'text', text: '' } as Part,
+            { type: 'text', text: 'The changes are complete.' } as Part,
+        ];
+
+        const projection = projectTurnRecords([user, assistant]);
+
+        expect(projection.turns[0]?.summary.sourcePartId).toBe('a1-part-1-text');
+    });
+
     test('keeps out-of-order assistant replies attached to their parent user turn', () => {
         const user1 = createMessageEntry({ id: 'u1', role: 'user', createdAt: 1 });
         const assistant1 = createMessageEntry({ id: 'a1', role: 'assistant', parentID: 'u1', createdAt: 2 });

@@ -2,31 +2,44 @@ import { describe, expect, test } from 'bun:test';
 import type { Part, ToolPart } from '@opencode-ai/sdk/v2';
 
 import type { TurnActivityRecord } from '../../lib/turns/types';
-import { aggregateRows, getContiguousActivityRun, getContiguousToolActivityRun } from './progressiveGroupRows';
+import { aggregateRows, getContiguousActivityRun } from './progressiveGroupRows';
 
-const makeToolActivity = (id: string, tool: string): TurnActivityRecord => ({
-    id,
-    turnId: 'turn-1',
-    messageId: 'message-1',
-    partIndex: 0,
-    kind: 'tool',
-    part: {
-        id,
-        sessionID: 'session-1',
-        messageID: 'message-1',
-        type: 'tool',
-        tool,
-        callID: id,
-        state: {
+const makeToolActivity = (id: string, tool: string, status: 'completed' | 'error' = 'completed'): TurnActivityRecord => {
+    const input = tool === 'bash' ? { command: 'bun test' } : { filePath: 'src/example.ts' };
+    const state: ToolPart['state'] = status === 'error'
+        ? {
+            status: 'error',
+            input,
+            error: 'Tool failed',
+            metadata: {},
+            time: { start: 1, end: 2 },
+        }
+        : {
             status: 'completed',
-            input: tool === 'bash' ? { command: 'bun test' } : { filePath: 'src/example.ts' },
+            input,
             output: '',
             title: '',
             metadata: {},
             time: { start: 1, end: 2 },
-        },
-    } satisfies ToolPart,
-});
+        };
+
+    return {
+        id,
+        turnId: 'turn-1',
+        messageId: 'message-1',
+        partIndex: 0,
+        kind: 'tool',
+        part: {
+            id,
+            sessionID: 'session-1',
+            messageID: 'message-1',
+            type: 'tool',
+            tool,
+            callID: id,
+            state,
+        } satisfies ToolPart,
+    };
+};
 
 const makeReasoningActivity = (id: string): TurnActivityRecord => ({
     id,
@@ -137,6 +150,23 @@ describe('ProgressiveGroup tool activity rows', () => {
         ]);
     });
 
+    test('keeps failed tools individual so their error state stays visible', () => {
+        const rows = aggregateRows([
+            makeToolActivity('edit-1', 'edit'),
+            makeToolActivity('write-1', 'write'),
+            makeToolActivity('read-failed', 'read', 'error'),
+            makeToolActivity('bash-1', 'bash'),
+            makeToolActivity('shell-1', 'shell'),
+        ]);
+
+        expect(rows.map((row) => row.type)).toEqual([
+            'tool-activity-group',
+            'tool-expandable',
+            'tool-activity-group',
+        ]);
+        expect(rows[1]?.type === 'tool-expandable' ? rows[1].activity.id : null).toBe('read-failed');
+    });
+
     test('orders summary categories independently of tool order', () => {
         const rows = aggregateRows([
             makeToolActivity('search-1', 'websearch'),
@@ -162,19 +192,6 @@ describe('ProgressiveGroup tool activity rows', () => {
 
         expect(rows).toHaveLength(1);
         expect(rows[0]?.type).toBe('tool-expandable');
-    });
-
-    test('finds live contiguous runs without crossing non-tool content', () => {
-        const run = getContiguousToolActivityRun([
-            makeToolActivity('edit-1', 'edit'),
-            makeToolActivity('bash-1', 'bash'),
-            null,
-            makeToolActivity('write-1', 'write'),
-        ], 0);
-
-        expect(run?.activities.map((activity) => activity.id)).toEqual(['edit-1', 'bash-1']);
-        expect(run?.nextIndex).toBe(2);
-        expect(getContiguousToolActivityRun([null], 0)).toBeNull();
     });
 
     test('finds live contiguous runs that include Thinking parts', () => {

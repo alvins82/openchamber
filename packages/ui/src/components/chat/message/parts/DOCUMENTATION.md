@@ -107,6 +107,8 @@ Use this doc when you ask an agent to change tool/header/description behavior.
 - Consecutive `read`, search, file-change, shell, and web-search activity is
   collapsed into one runtime-derived summary row in both live and sorted modes.
   Adjacent Thinking parts join that row when the run contains a groupable tool.
+  Failed tools remain individual expandable rows so their error state stays
+  visible.
   `skill`, task, and unrelated tools remain boundaries or individual rows.
 - A turn with assistant output or visible activity has a runtime-derived
   turn-level row. While the turn is running it says `Working for ...`, remains

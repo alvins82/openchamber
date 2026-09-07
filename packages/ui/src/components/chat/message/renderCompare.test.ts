@@ -8,6 +8,8 @@ const finalAnswerContext: TurnGroupingContext = {
   isLastAssistantInTurn: true,
   isLatestTurn: true,
   isWorking: false,
+  isTurnWorking: false,
+  isWorkedForExpanded: false,
   hasTools: false,
   hasReasoning: false,
   hasEarlierAssistantText: false,

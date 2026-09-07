@@ -39,7 +39,7 @@ import { formatTimestampForDisplay, formatTurnDuration } from './timeFormat';
 import { ToolRevealOnMount } from './parts/ToolRevealOnMount';
 import { StaticToolRow } from './parts/ProgressiveGroup';
 import { isExpandableTool, isStandaloneTool } from './parts/toolRenderUtils';
-import { getContiguousActivityRun } from './parts/progressiveGroupRows';
+import { getContiguousActivityRun, isFailedToolActivity } from './parts/progressiveGroupRows';
 import TurnActivity from '../components/TurnActivity';
 import TurnWorkedFor from '../components/TurnWorkedFor';
 import { useProjectContextStore } from '@/stores/useProjectContextStore';
@@ -1165,6 +1165,14 @@ const AssistantMessageBody = React.memo(({
             });
     }, [parts]);
 
+    const partIndexByReference = React.useMemo(() => {
+        const indexes = new Map<Part, number>();
+        parts.forEach((part, partIndex) => {
+            indexes.set(part, partIndex);
+        });
+        return indexes;
+    }, [parts]);
+
     const toolParts = React.useMemo(() => {
         return visibleParts.filter((part): part is ToolPartType => part.type === 'tool');
     }, [visibleParts]);
@@ -1689,7 +1697,8 @@ const AssistantMessageBody = React.memo(({
     }, [activityPartsForTurn]);
 
     const liveActivityParts = React.useMemo<Array<TurnActivityRecord | null>>(() => {
-        return visibleParts.map((part, partIndex) => {
+        return visibleParts.map((part, visiblePartIndex) => {
+            const partIndex = partIndexByReference.get(part) ?? visiblePartIndex;
             if (part.type === 'tool') {
                 if (!shouldShowTool(part)) {
                     return null;
@@ -1728,7 +1737,7 @@ const AssistantMessageBody = React.memo(({
                 kind: 'reasoning' as const,
             };
         });
-    }, [activityByPart, collapsibleThinkingBlocks, messageId, shouldShowTool, showReasoningTraces, turnGroupingContext?.turnId, visibleParts]);
+    }, [activityByPart, collapsibleThinkingBlocks, messageId, partIndexByReference, shouldShowTool, showReasoningTraces, turnGroupingContext?.turnId, visibleParts]);
 
     const toggleActivityGroup = turnGroupingContext?.toggleGroup;
     const isActivityOwnerMessage = !isSortedRenderMode
@@ -1872,7 +1881,8 @@ const AssistantMessageBody = React.memo(({
         // after that tool's row so e.g. an Agent Task sits chronologically
         // between the activity before it and the activity after it.
         const localToolPartIds = new Set<string>();
-        visibleParts.forEach((part, partIndex) => {
+        visibleParts.forEach((part, visiblePartIndex) => {
+            const partIndex = partIndexByReference.get(part) ?? visiblePartIndex;
             if (part.type === 'tool') {
                 localToolPartIds.add(part.id ?? `${messageId}-part-${partIndex}-${part.type}`);
             }
@@ -1924,7 +1934,12 @@ const AssistantMessageBody = React.memo(({
                     shouldHideWorkedForContent
                     && turnGroupingContext?.summarySourceMessageId
                     && turnGroupingContext.summarySourcePartId
-                    && !isTurnSummaryTextPart(turnGroupingContext, messageId, part, i)
+                    && !isTurnSummaryTextPart(
+                        turnGroupingContext,
+                        messageId,
+                        part,
+                        partIndexByReference.get(part) ?? i,
+                    )
                 ) {
                     i += 1;
                     continue;
@@ -2058,7 +2073,7 @@ const AssistantMessageBody = React.memo(({
             if (part.type === 'tool') {
                 const toolPart = part as ToolPartType;
                 const toolName = toolPart.tool?.toLowerCase() ?? '';
-                const toolPartId = toolPart.id ?? `${messageId}-part-${i}-${part.type}`;
+                const toolPartId = toolPart.id ?? `${messageId}-part-${partIndexByReference.get(part) ?? i}-${part.type}`;
 
                 if (shouldHideWorkedForContent) {
                     i += 1;
@@ -2072,6 +2087,7 @@ const AssistantMessageBody = React.memo(({
                 }
 
                 const activity = activityByPart.get(part);
+                const liveActivity = liveActivityParts[i];
                 if (activity?.kind === 'tool' && !isStandaloneTool(toolName)) {
                     flushSegmentsAfterTool(toolPartId);
                     i += 1;
@@ -2109,7 +2125,7 @@ const AssistantMessageBody = React.memo(({
                 }
 
                 // Expandable tools: bash, edit, write, task, question — individual rows
-                if (isExpandableTool(toolName)) {
+                if (isExpandableTool(toolName) || (liveActivity?.kind === 'tool' && isFailedToolActivity(liveActivity))) {
                     rendered.push(
                         <FadeInOnReveal key={`tool-${toolPart.id}`}>
                             <ToolRevealOnMount animate={animatedToolIdsLookup.has(toolPart.id)} wipe>
@@ -2191,6 +2207,7 @@ const AssistantMessageBody = React.memo(({
         liveActivityParts,
         messageId,
         messageActionButtons,
+        partIndexByReference,
         renderJustificationActions,
         sessionId,
         onShowPopup,

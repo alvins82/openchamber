@@ -58,31 +58,18 @@ const getToolActivitySummaryForPart = (activity: TurnActivityPart): ToolActivity
     return category ? { category, count: 1 } : null;
 };
 
-export const getContiguousToolActivityRun = (
-    parts: readonly (TurnActivityPart | null)[],
-    startIndex: number,
-): { activities: TurnActivityPart[]; nextIndex: number } | null => {
-    const first = parts[startIndex];
-    if (!first || !getToolActivitySummaryForPart(first)) {
-        return null;
+export const isFailedToolActivity = (activity: TurnActivityPart): boolean => {
+    if (activity.kind !== 'tool' || activity.part.type !== 'tool') {
+        return false;
     }
 
-    const activities = [first];
-    let nextIndex = startIndex + 1;
-    while (nextIndex < parts.length) {
-        const nextActivity = parts[nextIndex];
-        if (!nextActivity || !getToolActivitySummaryForPart(nextActivity)) {
-            break;
-        }
-        activities.push(nextActivity);
-        nextIndex += 1;
-    }
-
-    return { activities, nextIndex };
+    const status = activity.part.state?.status;
+    return status === 'error';
 };
 
 const isActivityGroupMember = (activity: TurnActivityPart): boolean => {
-    return activity.kind === 'reasoning' || getToolActivitySummaryForPart(activity) !== null;
+    return activity.kind === 'reasoning'
+        || (!isFailedToolActivity(activity) && getToolActivitySummaryForPart(activity) !== null);
 };
 
 /**
@@ -193,6 +180,16 @@ export const aggregateRows = (parts: TurnActivityPart[]): AggregatedRow[] => {
             i++;
             continue;
         }
+
+        // Failed tools stay individual so their existing error-colored
+        // expandable row remains visible instead of disappearing in a neutral
+        // collapsed summary.
+        if (isFailedToolActivity(activity)) {
+            rows.push({ type: 'tool-expandable', activity });
+            i++;
+            continue;
+        }
+
         const toolName = normalizeActivityToolName(activity.part.tool);
 
         if (isStandaloneTool(toolName)) {
