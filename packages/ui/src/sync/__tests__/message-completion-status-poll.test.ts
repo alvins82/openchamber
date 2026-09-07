@@ -7,7 +7,7 @@
  */
 import { beforeEach, describe, expect, mock, test } from "bun:test"
 import { create, type StoreApi } from "zustand"
-import type { SessionStatus } from "@opencode-ai/sdk/v2/client"
+import type { Message, Part, SessionStatus } from "@opencode-ai/sdk/v2/client"
 import { INITIAL_STATE } from "../types"
 import type { DirectoryStore } from "../child-store"
 
@@ -29,16 +29,42 @@ mock.module("@/lib/runtime-switch", () => ({
   getRuntimeKey: () => "test-runtime",
 }))
 
-import { maybePollStatusAfterMessageCompletion, MESSAGE_COMPLETION_STATUS_POLL_DELAY_MS } from "../sync-context"
+import {
+  maybePollStatusAfterMessageCompletion,
+  MESSAGE_COMPLETION_STATUS_POLL_DELAY_MS,
+  recoverInterruptedTurnAfterMessageLoad,
+} from "../sync-context"
 
-const createStore = (status: SessionStatus): StoreApi<DirectoryStore> => {
+const createStore = (status?: SessionStatus): StoreApi<DirectoryStore> => {
+  const session_status: DirectoryStore["session_status"] = {}
+  if (status) session_status.ses_1 = status
   return create<DirectoryStore>()((set) => ({
     ...INITIAL_STATE,
-    session_status: { ses_1: status },
+    session_status,
     patch: (partial) => set(partial),
     replace: (next) => set(next),
   }))
 }
+
+// SAFETY: The recovery path reads only the identity, role, and completion time
+// fields from this synthetic assistant message.
+const unfinishedAssistant = {
+  id: "msg_1",
+  sessionID: "ses_1",
+  role: "assistant",
+  time: { created: 1 },
+} as Message
+
+// SAFETY: The recovery path reads only the tool discriminator and state fields
+// from this synthetic part.
+const runningTool = {
+  id: "part_1",
+  messageID: "msg_1",
+  sessionID: "ses_1",
+  type: "tool",
+  tool: "bash",
+  state: { status: "running", time: { start: 1 }, input: {} },
+} as Part
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -137,5 +163,24 @@ describe("maybePollStatusAfterMessageCompletion (issue OPE-193)", () => {
     // One monotonic poll plus its authoritative escalation, not three.
     expect(statusSnapshotCalls).toEqual(["/test/project", "/test/project"])
     expect(store.getState().session_status?.ses_1?.type).toBe("idle")
+  })
+
+  test("recovers an unfinished turn after reload when status was initially unknown", async () => {
+    const store = createStore()
+    store.getState().patch({
+      message: { ses_1: [unfinishedAssistant] },
+      part: { msg_1: [runningTool] },
+    })
+
+    await recoverInterruptedTurnAfterMessageLoad("/test/project", store, "ses_1")
+
+    expect(statusSnapshotCalls).toEqual(["/test/project"])
+    expect(store.getState().session_status?.ses_1?.type).toBe("idle")
+    const message = store.getState().message.ses_1[0]
+    expect(message?.role).toBe("assistant")
+    if (message?.role === "assistant") expect(message.time.completed).toBeDefined()
+    const part = store.getState().part.msg_1[0]
+    expect(part?.type).toBe("tool")
+    if (part?.type === "tool") expect(part.state.status).toBe("error")
   })
 })

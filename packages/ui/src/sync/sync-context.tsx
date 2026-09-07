@@ -476,6 +476,9 @@ async function materializeSessionFromServer(
   if (statusBeforeMaterialization && statusBeforeMaterialization.type !== "idle" && !options?.isStale?.()) {
     await resyncDirectorySessionStatuses(directory, store, [sessionID], "authoritative")
   }
+  if (!options?.isStale?.()) {
+    await recoverInterruptedTurnAfterMessageLoad(directory, store, sessionID)
+  }
 }
 
 // Module-level refs for notification viewed check.
@@ -718,7 +721,10 @@ export function applySessionStatusSnapshot(
       if (mode === "monotonic") continue
 
       const existing = current[sessionId]
-      if (existing && existing.type !== "idle") {
+      // Keep the successful snapshot distinguishable from "status has never
+      // been observed". Interrupted-turn recovery requires this explicit
+      // settle marker after a cold reload.
+      if (!existing || existing.type !== "idle") {
         draft()[sessionId] = { type: "idle" }
         changed = true
       }
@@ -751,20 +757,7 @@ async function resyncDirectorySessionStatuses(
     // which is the gate the helper requires — a session the snapshot reports
     // busy stays untouched.
     for (const sessionId of candidateSessionIds) {
-      const interrupted = interruptedTurnToolParts(store.getState(), sessionId)
-      if (interrupted) {
-        if (!interrupted.parts) {
-          store.setState((state) => ({
-            message: { ...state.message, [sessionId]: interrupted.messages },
-          }))
-          continue
-        }
-        const interruptedParts = interrupted.parts
-        store.setState((state) => ({
-          message: { ...state.message, [sessionId]: interrupted.messages },
-          part: { ...state.part, [interrupted.messageID]: interruptedParts },
-        }))
-      }
+      applyInterruptedTurnReconciliation(store, sessionId)
     }
   }
   return nextStatuses
@@ -1546,6 +1539,7 @@ async function resyncDirectoryAfterReconnect(
       }).catch(() => null),
       loader?.refreshTail({ directory, sessionID: sessionId }, RECONNECT_MESSAGE_LIMIT) ?? Promise.resolve(),
     ])
+    await recoverInterruptedTurnAfterMessageLoad(directory, store, sessionId)
     const session = sessionResponse?.data
     if (!session) return
 
@@ -2142,6 +2136,67 @@ export function interruptedTurnToolParts(
     messages: nextMessages,
     parts: partsChanged ? nextParts : undefined,
   }
+}
+
+function hasUnfinishedAssistantTurn(state: DirectoryStore, sessionID: string): boolean {
+  const messages = state.message[sessionID] ?? []
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message.role === "user") return false
+    if (message.role !== "assistant") continue
+    return message.time.completed === undefined
+  }
+  return false
+}
+
+function applyInterruptedTurnReconciliation(store: StoreApi<DirectoryStore>, sessionID: string): void {
+  const interrupted = interruptedTurnToolParts(store.getState(), sessionID)
+  if (!interrupted) return
+
+  const interruptedParts = interrupted.parts
+  if (!interruptedParts) {
+    store.setState((state) => ({
+      message: { ...state.message, [sessionID]: interrupted.messages },
+    }))
+    return
+  }
+
+  store.setState((state) => ({
+    message: { ...state.message, [sessionID]: interrupted.messages },
+    part: { ...state.part, [interrupted.messageID]: interruptedParts },
+  }))
+}
+
+/**
+ * Re-checks a hydrated session whose trailing assistant turn is unfinished.
+ * A cold reload can hydrate messages after the initial status snapshot, so the
+ * settle decision must be repeated after the message records are available.
+ * If no per-session status exists yet, fetch one authoritative snapshot first;
+ * a successful snapshot that omits the session establishes it as idle.
+ */
+export async function recoverInterruptedTurnAfterMessageLoad(
+  directory: string,
+  store: StoreApi<DirectoryStore>,
+  sessionID: string,
+): Promise<void> {
+  const initial = store.getState()
+  if (!hasUnfinishedAssistantTurn(initial, sessionID)) return
+  if ((initial.question?.[sessionID] ?? []).length > 0) return
+  if ((initial.permission?.[sessionID] ?? []).length > 0) return
+
+  if (!initial.session_status?.[sessionID]) {
+    const snapshot = await opencodeClient.getSessionStatusForDirectory(directory)
+    if (snapshot === null) return
+
+    // Do not overwrite a live status event that arrived while the snapshot was
+    // in flight. The snapshot only fills the previously unknown state.
+    if (!store.getState().session_status?.[sessionID]) {
+      applySessionStatusSnapshot(store, snapshot, [sessionID], "authoritative")
+      applyGlobalSessionStatusSnapshot(directory, snapshot, [sessionID])
+    }
+  }
+
+  applyInterruptedTurnReconciliation(store, sessionID)
 }
 
 // ---------------------------------------------------------------------------
