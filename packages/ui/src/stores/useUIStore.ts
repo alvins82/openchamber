@@ -1190,7 +1190,7 @@ export const useUIStore = create<UIStore>()(
         workStatusPanelVisible: false,
         workStatusPanelFits: false,
         workStatusOverlayOpen: false,
-        workStatusHiddenSections: ['telemetry'],
+        workStatusHiddenSections: [],
         workStatusHiddenSectionsExplicit: false,
         isSessionSwitcherOpen: false,
         isSessionDropdownOpen: false,
@@ -2720,22 +2720,18 @@ export const useUIStore = create<UIStore>()(
       {
         name: 'ui-store',
         storage: createDeferredSafeJSONStorage(),
-        version: 20,
+        version: 21,
         migrate: (persistedState, version) => {
           if (!persistedState || typeof persistedState !== 'object') {
             return persistedState;
           }
           const state = persistedState as Record<string, unknown>;
 
-          // v19 -> v20: lists written before telemetry existed are not opt-ins.
-          if (version < 20 && state.workStatusHiddenSectionsExplicit !== true) {
-            if (Array.isArray(state.workStatusHiddenSections)) {
-              if (!state.workStatusHiddenSections.includes('telemetry')) {
-                state.workStatusHiddenSections.push('telemetry');
-              }
-            } else {
-              state.workStatusHiddenSections = ['telemetry'];
-            }
+          // v20 -> v21: enable telemetry by default; preserve explicit choices.
+          if (version < 21 && state.workStatusHiddenSectionsExplicit !== true) {
+            state.workStatusHiddenSections = Array.isArray(state.workStatusHiddenSections)
+              ? state.workStatusHiddenSections.filter((id) => id !== 'telemetry')
+              : [];
             state.workStatusHiddenSectionsExplicit = false;
           }
 
