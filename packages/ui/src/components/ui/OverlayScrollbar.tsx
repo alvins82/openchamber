@@ -67,6 +67,11 @@ function bindScrollbar(
   let hideDeadlineMs = 0;
   let lastUserIntentTimeMs = Number.NEGATIVE_INFINITY;
   let pointerOverThumb = false;
+  // The thumb is a sibling overlay of the container, so hover state is tracked
+  // for both: moving the pointer from the container onto the thumb fires the
+  // container's pointerleave before the thumb's pointerover, and the hide timer
+  // must not run in the gap between those two events.
+  let pointerOverContainer = false;
 
   // Drag state is the minimum snapshot needed to convert pointer travel back into a scroll offset.
   let drag: {
@@ -84,11 +89,11 @@ function bindScrollbar(
   };
 
   const scheduleHide = () => {
-    if (options.alwaysVisible || pointerOverThumb || drag || hideTimerId !== null) return;
+    if (options.alwaysVisible || pointerOverThumb || pointerOverContainer || drag || hideTimerId !== null) return;
 
     const hide = () => {
       hideTimerId = null;
-      if (options.alwaysVisible || pointerOverThumb || drag) return;
+      if (options.alwaysVisible || pointerOverThumb || pointerOverContainer || drag) return;
       const delay = hideDeadlineMs - performance.now();
       if (delay > 0) {
         hideTimerId = setTimeout(hide, delay);
@@ -163,7 +168,7 @@ function bindScrollbar(
   const onScroll = () => {
     const shouldShow = options.alwaysVisible || drag
       || (!options.suppressVisibility
-        && (!options.userIntentOnly
+        && (pointerOverContainer || pointerOverThumb || !options.userIntentOnly
           || performance.now() - lastUserIntentTimeMs <= USER_INTENT_DURATION_MS));
 
     if (!shouldShow) {
@@ -247,7 +252,34 @@ function bindScrollbar(
     scheduleHide();
   };
 
+  // Hover makes the thumb reachable without wheel input. Touch/pen pointerenter
+  // also fires on contact, so only mouse pointers get this affordance.
+  const onContainerPointerEnter = (event: PointerEvent) => {
+    if (event.pointerType !== "mouse") return;
+    pointerOverContainer = true;
+    if (options.suppressVisibility && !options.alwaysVisible) return;
+    hideDeadlineMs = performance.now() + options.hideDelayMs;
+    if (hideTimerId !== null) {
+      clearTimeout(hideTimerId);
+      hideTimerId = null;
+    }
+    setVisible(true);
+    // Hidden programmatic scrolling may have skipped positioning. Refresh both
+    // position and overflow on reveal; disabled horizontal geometry stays unread.
+    scheduleUpdate(true);
+  };
+
+  const onContainerPointerLeave = (event: PointerEvent) => {
+    if (event.pointerType !== "mouse") return;
+    pointerOverContainer = false;
+    if (options.suppressVisibility) return;
+    hideDeadlineMs = performance.now() + options.hideDelayMs;
+    scheduleHide();
+  };
+
   container.addEventListener("scroll", onScroll, { passive: true });
+  container.addEventListener("pointerenter", onContainerPointerEnter);
+  container.addEventListener("pointerleave", onContainerPointerLeave);
   root.addEventListener("pointerdown", onPointerDown);
   root.addEventListener("pointermove", onPointerMove);
   root.addEventListener("pointerup", onPointerEnd);
@@ -325,10 +357,13 @@ function bindScrollbar(
         }
         if (visibilityChanged) scheduleUpdate();
         setVisible(true);
-      } else if (visibilityChanged) {
-        setVisible(Boolean(drag || pointerOverThumb));
       } else if (options.suppressVisibility && !drag) {
         setVisible(false);
+      } else if (pointerOverContainer || pointerOverThumb) {
+        scheduleUpdate();
+        setVisible(true);
+      } else if (visibilityChanged) {
+        setVisible(Boolean(drag));
       }
     },
     disconnect() {
@@ -338,6 +373,8 @@ function bindScrollbar(
       verticalThumb.hidden = true;
       horizontalThumb.hidden = true;
       container.removeEventListener("scroll", onScroll);
+      container.removeEventListener("pointerenter", onContainerPointerEnter);
+      container.removeEventListener("pointerleave", onContainerPointerLeave);
       setUserIntentListeners(false);
       root.removeEventListener("pointerdown", onPointerDown);
       root.removeEventListener("pointermove", onPointerMove);
