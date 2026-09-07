@@ -127,6 +127,13 @@ export interface TurnGroupingContext {
     userMessageCreatedAt?: number;
     userMessageVariant?: string;
     isWorking: boolean;
+    isTurnWorking: boolean;
+    isWorkedForExpanded: boolean;
+    summarySourceMessageId?: string;
+    summarySourcePartId?: string;
+    turnCompletedAt?: number;
+    turnDurationMs?: number;
     isGroupExpanded?: boolean;
     toggleGroup?: () => void;
+    toggleWorkedFor?: () => void;
 }

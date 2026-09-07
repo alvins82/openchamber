@@ -11,6 +11,7 @@ import { MarkdownRenderer } from '../../MarkdownRenderer';
 import { useStreamingTextThrottle } from '../../hooks/useStreamingTextThrottle';
 import { commitStreamedText } from '../../lib/streamTextCommit';
 import type { StreamPhase } from '../types';
+import { useReasoningScrollFollow } from './useReasoningScrollFollow';
 
 const TOOL_ROW_TEXT_CLASS = '!text-[length:var(--text-meta)] !leading-5 sm:!leading-6 tracking-normal';
 const TOOL_ROW_TITLE_CLASS = cn('typography-meta font-medium', TOOL_ROW_TEXT_CLASS);
@@ -261,6 +262,15 @@ export const ReasoningTimelineBlock: React.FC<ReasoningTimelineBlockProps> = ({
         };
     }, []);
 
+    const scrollRef = React.useRef<HTMLElement | null>(null);
+    const reasoningContentRef = React.useRef<HTMLDivElement | null>(null);
+    const { handleWheelCapture, handleScroll } = useReasoningScrollFollow(
+        scrollRef,
+        reasoningContentRef,
+        isStreaming,
+        text,
+    );
+
     // While genuinely streaming, the busy header must appear as soon as
     // reasoning starts even before the block-level reveal (commitStreamedText)
     // has committed a first complete line — otherwise "Thinking…" never shows
@@ -312,7 +322,7 @@ export const ReasoningTimelineBlock: React.FC<ReasoningTimelineBlockProps> = ({
                                 isExpanded && 'opacity-0',
                                 !isExpanded && 'group-hover/tool:opacity-0',
                             )}
-                            style={{ color: 'var(--tools-icon)' }}
+                            style={{ color: 'var(--tools-description)' }}
                         >
                             <Icon name="brain-ai-3" className="h-3.5 w-3.5" />
                         </div>
@@ -322,28 +332,28 @@ export const ReasoningTimelineBlock: React.FC<ReasoningTimelineBlockProps> = ({
                                 isExpanded && 'opacity-100',
                                 !isExpanded && 'opacity-0 group-hover/tool:opacity-100',
                             )}
-                            style={{ color: 'var(--tools-icon)' }}
+                            style={{ color: 'var(--tools-description)' }}
                         >
                             {isExpanded ? <Icon name="arrow-down-s" className="h-3.5 w-3.5" /> : <Icon name="arrow-right-s" className="h-3.5 w-3.5" />}
                         </div>
                     </div>
 
                     {isStreaming ? (
-                        <span className={cn('flex items-center gap-1', TOOL_ROW_TITLE_CLASS)} style={{ color: 'var(--tools-title)' }}>
+                        <span className={cn('flex items-center gap-1', TOOL_ROW_TITLE_CLASS)} style={{ color: 'var(--tools-description)' }}>
                             <span>{t(variant === 'justification' ? 'chat.reasoningTrace.justification' : 'chat.reasoningTrace.thinking')}</span>
                             <BusyDots />
                         </span>
                     ) : isExpanded ? (
                         <span
                             className={TOOL_ROW_TITLE_CLASS}
-                            style={{ color: 'var(--tools-title)' }}
+                            style={{ color: 'var(--tools-description)' }}
                         >
                             {t(variant === 'justification' ? 'chat.reasoningTrace.justification' : 'chat.reasoningTrace.thinking')}
                         </span>
                     ) : (
                         <span
                             className={TOOL_ROW_TITLE_CLASS}
-                            style={{ color: 'var(--tools-title)' }}
+                            style={{ color: 'var(--tools-description)' }}
                         >
                             {t(variant === 'justification' ? 'chat.reasoningTrace.justification' : 'chat.reasoningTrace.thinking')}
                         </span>
@@ -389,28 +399,22 @@ export const ReasoningTimelineBlock: React.FC<ReasoningTimelineBlockProps> = ({
                             className="pointer-events-none absolute left-0 top-0 bottom-0 w-px"
                             style={{ backgroundColor: 'var(--tools-border)' }}
                         />
-                        {isStreaming ? (
-                            // While streaming, let the thinking grow inline — no
-                            // capped, independently-scrollable box. The chat's own
-                            // auto-follow then handles following / releasing, so the
-                            // box never captures the wheel or fights the user's
-                            // scroll. The max-height scroll box is applied only once
-                            // the thinking has finished (the branch below).
-                            <div className="p-0">
+                        <ScrollableOverlay
+                            ref={scrollRef}
+                            as="div"
+                            outerClassName="max-h-80"
+                            className="p-0"
+                            data-scrollable="true"
+                            useScrollShadow
+                            scrollShadowSize={36}
+                            userIntentOnly
+                            onWheelCapture={handleWheelCapture}
+                            onScroll={handleScroll}
+                        >
+                            <div ref={reasoningContentRef}>
                                 {reasoningBody}
                             </div>
-                        ) : (
-                            <ScrollableOverlay
-                                as="div"
-                                outerClassName="max-h-80"
-                                className="p-0"
-                                useScrollShadow
-                                scrollShadowSize={36}
-                                userIntentOnly
-                            >
-                                {reasoningBody}
-                            </ScrollableOverlay>
-                        )}
+                        </ScrollableOverlay>
                     </div>
                 </div>
             ) : null}

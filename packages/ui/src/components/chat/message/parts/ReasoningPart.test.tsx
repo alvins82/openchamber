@@ -7,6 +7,7 @@ import type { Part } from '@opencode-ai/sdk/v2';
 
 import { I18nProvider } from '@/lib/i18n';
 import ReasoningPart, { ReasoningTimelineBlock } from './ReasoningPart';
+import { useReasoningScrollFollow } from './useReasoningScrollFollow';
 import type { StreamPhase } from '../types';
 
 type ReasoningPartFixture = Extract<Part, { type: 'reasoning' }>;
@@ -19,29 +20,67 @@ type ReasoningPartFixture = Extract<Part, { type: 'reasoning' }>;
  * `Window`/`Document`.
  */
 const DOM_GLOBAL_NAMES = [
-  'window',
-  'document',
-  'navigator',
-  'Node',
-  'Element',
-  'HTMLElement',
-  'IS_REACT_ACT_ENVIRONMENT',
+    'window',
+    'document',
+    'navigator',
+    'Node',
+    'NodeList',
+    'Element',
+    'HTMLElement',
+    'ResizeObserver',
+    'requestAnimationFrame',
+    'cancelAnimationFrame',
+    'IS_REACT_ACT_ENVIRONMENT',
 ] as const;
 
+class TestResizeObserver implements ResizeObserver {
+    static instances: TestResizeObserver[] = [];
+
+    private readonly callback: ResizeObserverCallback;
+    readonly observed: Element[] = [];
+
+    constructor(callback: ResizeObserverCallback) {
+        this.callback = callback;
+        TestResizeObserver.instances.push(this);
+    }
+
+    disconnect(): void {}
+
+    observe(target: Element): void {
+        this.observed.push(target);
+    }
+
+    unobserve(target: Element): void {
+        const index = this.observed.indexOf(target);
+        if (index >= 0) this.observed.splice(index, 1);
+    }
+
+    trigger(target: Element): void {
+        if (this.observed.includes(target)) {
+            this.callback([], this);
+        }
+    }
+}
+
 const installDomStub = () => {
-  const happyWindow = new Window({ url: 'http://localhost' });
-  const previous = DOM_GLOBAL_NAMES.map(
-    (name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)] as const,
-  );
+    const happyWindow = new Window({ url: 'http://localhost' });
+    TestResizeObserver.instances = [];
+    const previous = DOM_GLOBAL_NAMES.map(
+        (name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)] as const,
+    );
   const values = {
     window: happyWindow,
     document: happyWindow.document,
-    navigator: happyWindow.navigator,
-    Node: happyWindow.Node,
-    Element: happyWindow.Element,
-    HTMLElement: happyWindow.HTMLElement,
-    IS_REACT_ACT_ENVIRONMENT: true,
-  };
+        navigator: happyWindow.navigator,
+        Node: happyWindow.Node,
+        NodeList: happyWindow.NodeList,
+        Element: happyWindow.Element,
+        HTMLElement: happyWindow.HTMLElement,
+        ResizeObserver: TestResizeObserver,
+        requestAnimationFrame: happyWindow.requestAnimationFrame.bind(happyWindow),
+        cancelAnimationFrame: happyWindow.cancelAnimationFrame.bind(happyWindow),
+        IS_REACT_ACT_ENVIRONMENT: true,
+    };
   for (const name of DOM_GLOBAL_NAMES) {
     Object.defineProperty(globalThis, name, { value: values[name], configurable: true, writable: true });
   }
@@ -53,13 +92,14 @@ const installDomStub = () => {
 
   return {
     container,
-    restore: () => {
-      for (const [name, descriptor] of previous) {
-        if (descriptor) Object.defineProperty(globalThis, name, descriptor);
-        else Reflect.deleteProperty(globalThis, name);
-      }
-    },
-  };
+        restore: () => {
+            for (const [name, descriptor] of previous) {
+                if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+                else Reflect.deleteProperty(globalThis, name);
+            }
+            happyWindow.close();
+        },
+    };
 };
 
 // A reasoning text whose summary (first 120 chars) fits in the header but
@@ -71,9 +111,31 @@ const LONG_REASONING =
 
 // A long text that should render the collapsible header with a label
 const LONG_JUSTIFICATION =
-  'Sorting by activity first because the active session needs immediate attention.\n' +
-  'Secondary sort by last updated timestamp ensures a stable deterministic ordering ' +
-  'when multiple sessions have the same activity state.';
+    'Sorting by activity first because the active session needs immediate attention.\n' +
+    'Secondary sort by last updated timestamp ensures a stable deterministic ordering ' +
+    'when multiple sessions have the same activity state.';
+
+const ScrollFollowHarness: React.FC<{ contentKey: string }> = ({ contentKey }) => {
+    const scrollRef = React.useRef<HTMLDivElement | null>(null);
+    const contentRef = React.useRef<HTMLDivElement | null>(null);
+    const { handleWheelCapture, handleScroll } = useReasoningScrollFollow(
+        scrollRef,
+        contentRef,
+        true,
+        contentKey,
+    );
+
+    return (
+        <div
+            ref={scrollRef}
+            data-scrollable="true"
+            onWheelCapture={handleWheelCapture}
+            onScroll={handleScroll}
+        >
+            <div ref={contentRef} />
+        </div>
+    );
+};
 
 describe('ReasoningTimelineBlock', () => {
   test('renders reasoning traces behind an accessible collapsed disclosure by default', () => {
@@ -237,6 +299,67 @@ describe('ReasoningPart streaming gating (issue #2020)', () => {
 
     expect(markup).toContain(BUSY_INDICATOR);
     expect(markup).toContain('aria-expanded="true"');
+  });
+
+  test('keeps live reasoning pinned as the rendered body grows', async () => {
+    const dom = installDomStub();
+    const root = createRoot(dom.container);
+
+    try {
+      await act(async () => {
+        root.render(<ScrollFollowHarness contentKey="first" />);
+      });
+
+      const scrollElement = dom.container.querySelector<HTMLElement>('[data-scrollable="true"]');
+      const content = scrollElement?.firstElementChild;
+      if (!scrollElement || !(content instanceof HTMLElement)) {
+        throw new Error('Reasoning scroller did not render');
+      }
+
+      let scrollTop = 0;
+      let scrollHeight = 300;
+      Object.defineProperties(scrollElement, {
+        clientHeight: { configurable: true, get: () => 100 },
+        scrollHeight: { configurable: true, get: () => scrollHeight },
+        scrollTop: {
+          configurable: true,
+          get: () => scrollTop,
+          set: (value: number) => {
+            scrollTop = value;
+          },
+        },
+      });
+
+      const observer = TestResizeObserver.instances.at(-1);
+      if (!observer) throw new Error('Reasoning content resize observer did not attach');
+      expect(observer.observed).toContain(content);
+
+      await act(async () => {
+        observer.trigger(content);
+      });
+      expect(scrollTop).toBe(300);
+
+      scrollTop = 100;
+      scrollElement.dispatchEvent(new window.WheelEvent('wheel', { bubbles: true, deltaY: -1 }));
+      scrollHeight = 400;
+      await act(async () => {
+        observer.trigger(content);
+      });
+      expect(scrollTop).toBe(100);
+
+      scrollTop = 300;
+      scrollElement.dispatchEvent(new window.Event('scroll', { bubbles: true }));
+      scrollHeight = 500;
+      await act(async () => {
+        observer.trigger(content);
+      });
+      expect(scrollTop).toBe(500);
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+      dom.restore();
+    }
   });
 
   test('a live part with no committed text yet shows the busy header and no empty summary', () => {
