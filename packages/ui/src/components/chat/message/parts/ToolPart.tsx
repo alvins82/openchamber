@@ -895,10 +895,9 @@ const TaskSummaryEntryRow = React.memo(({
                 the icon to the top of the block. Errors still wrap — they must
                 stay readable. */}
             <div className={cn('flex gap-2 min-w-0 w-full', status === 'error' && isMobile ? 'items-start' : 'items-center')}>
-                <span className="flex-shrink-0 text-foreground/80">{getToolIcon(toolName)}</span>
+                <span className="flex-shrink-0 text-[var(--tools-description)]">{getToolIcon(toolName)}</span>
                 <span
-                    className="typography-meta text-foreground/80 flex-shrink-0"
-                    style={{ color: 'var(--tools-title)' }}
+                    className="typography-meta flex-shrink-0 text-[var(--tools-description)]"
                     title={displayName}
                 >
                     {displayName}
@@ -1115,9 +1114,9 @@ const TOOL_COLLAPSED_CUSTOM_STYLE: React.CSSProperties = {
 const CODE_TAG_PROPS = { style: { background: 'transparent', backgroundColor: 'transparent' } };
 
 const TOOL_ERROR_ICON_STYLE: React.CSSProperties = { color: 'var(--status-error)' };
-const TOOL_NORMAL_ICON_STYLE: React.CSSProperties = { color: 'var(--tools-icon)' };
+const TOOL_NORMAL_ICON_STYLE: React.CSSProperties = { color: 'var(--tools-description)' };
 const TOOL_ERROR_TITLE_STYLE: React.CSSProperties = { color: 'var(--status-error)' };
-const TOOL_NORMAL_TITLE_STYLE: React.CSSProperties = { color: 'var(--tools-title)' };
+const TOOL_NORMAL_TITLE_STYLE: React.CSSProperties = { color: 'var(--tools-description)' };
 
 const renderPathLikeGitChanges = (path: string, grow = true) => {
     const lastSlash = path.lastIndexOf('/');
@@ -1162,7 +1161,7 @@ const renderAnimatedPathWithIcon = (path: string, animate = true, grow = true, s
                 <Text
                     variant={animate ? 'generate-effect' : 'static'}
                     className={cn('min-w-0 truncate whitespace-nowrap', TOOL_ROW_DESCRIPTION_CLASS, grow && 'flex-1')}
-                    style={{ color: 'var(--tools-title)' }}
+                    style={{ color: 'var(--tools-description)' }}
                 >
                     {path}
                 </Text>
@@ -1195,7 +1194,7 @@ const renderAnimatedPathWithIcon = (path: string, animate = true, grow = true, s
                 <Text
                     variant={animate ? 'generate-effect' : 'static'}
                     className="flex-shrink-0"
-                    style={{ color: 'var(--tools-title)' }}
+                    style={{ color: 'var(--tools-description)' }}
                 >
                     {name}
                 </Text>
@@ -2199,7 +2198,7 @@ const ToolPartContent: React.FC<ToolPartProps> = ({
                                             'flex-shrink-0 inline-flex h-4 w-4 items-center justify-center rounded transition-opacity hover:bg-[var(--surface-hover)]',
                                             'opacity-60 hover:opacity-100 focus-visible:opacity-100',
                                         )}
-                                        style={{ color: 'var(--tools-icon)' }}
+                        style={{ color: 'var(--tools-description)' }}
                                         title={t('chat.toolPart.openFile')}
                                         aria-label={t('chat.toolPart.openFile')}
                                     >
