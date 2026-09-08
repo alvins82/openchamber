@@ -5633,6 +5633,16 @@ app.whenReady().then(async () => {
     return;
   }
 
+  // Keep a visible splash while startup probes run. Activation and deep-link
+  // paths can race this bootstrap, so do not replace an existing main window.
+  if (!state.mainWindow || state.mainWindow.isDestroyed()) {
+    state.mainWindow = createBrowserWindow({
+      label: 'main',
+      restoreGeometry: true,
+      url: null,
+    });
+  }
+
   const initial = extractInitialDeepLinks();
   if (initial.length > 0) handleDeepLinks(initial);
   await openMainWindow();
