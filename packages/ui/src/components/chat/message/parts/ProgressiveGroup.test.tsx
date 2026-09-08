@@ -1,27 +1,53 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import React, { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { Window } from 'happy-dom';
+import { plugin } from 'bun';
+import { pathToFileURL } from 'node:url';
 import type { Part, ToolPart } from '@opencode-ai/sdk/v2';
 
+import { I18nProvider } from '@/lib/i18n';
 import type { TurnActivityRecord } from '../../lib/turns/types';
 import { aggregateRows, getContiguousActivityRun } from './progressiveGroupRows';
 
-const makeToolActivity = (id: string, tool: string, status: 'completed' | 'error' = 'completed'): TurnActivityRecord => {
+let ProgressiveGroup: typeof import('./ProgressiveGroup').default;
+
+plugin({
+    name: 'progressive-group-worker-url',
+    setup(build) {
+        build.onLoad({ filter: /markdown-shiki\.worker\.ts\?worker&url$/ }, ({ path }) => ({
+            contents: `export default ${JSON.stringify(pathToFileURL(path.split('?')[0]).href)};`,
+            loader: 'js',
+        }));
+    },
+});
+
+type ToolFixtureStatus = 'completed' | 'error' | 'running';
+
+const makeToolActivity = (id: string, tool: string, status: ToolFixtureStatus = 'completed'): TurnActivityRecord => {
     const input = tool === 'bash' ? { command: 'bun test' } : { filePath: 'src/example.ts' };
-    const state: ToolPart['state'] = status === 'error'
+    const state: ToolPart['state'] = status === 'running'
         ? {
-            status: 'error',
+            status: 'running',
             input,
-            error: 'Tool failed',
-            metadata: {},
-            time: { start: 1, end: 2 },
+            time: { start: 1 },
         }
-        : {
-            status: 'completed',
-            input,
-            output: '',
-            title: '',
-            metadata: {},
-            time: { start: 1, end: 2 },
-        };
+        : status === 'error'
+            ? {
+                status: 'error',
+                input,
+                error: 'Tool failed',
+                metadata: {},
+                time: { start: 1, end: 2 },
+            }
+            : {
+                status: 'completed',
+                input,
+                output: '',
+                title: '',
+                metadata: {},
+                time: { start: 1, end: 2 },
+            };
 
     return {
         id,
@@ -38,6 +64,71 @@ const makeToolActivity = (id: string, tool: string, status: 'completed' | 'error
             callID: id,
             state,
         } satisfies ToolPart,
+    };
+};
+
+const DOM_GLOBAL_NAMES = [
+    'window',
+    'document',
+    'navigator',
+    'Node',
+    'NodeList',
+    'Element',
+    'HTMLElement',
+    'SVGElement',
+    'HTMLIFrameElement',
+    'customElements',
+    'localStorage',
+    'fetch',
+    'getComputedStyle',
+    'ResizeObserver',
+    'requestAnimationFrame',
+    'cancelAnimationFrame',
+    'IS_REACT_ACT_ENVIRONMENT',
+] as const;
+
+const installDom = () => {
+    const happyWindow = new Window({ url: 'http://localhost' });
+    const previous = DOM_GLOBAL_NAMES.map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)] as const);
+    const values = {
+        window: happyWindow,
+        document: happyWindow.document,
+        navigator: happyWindow.navigator,
+        Node: happyWindow.Node,
+        NodeList: happyWindow.NodeList,
+        Element: happyWindow.Element,
+        HTMLElement: happyWindow.HTMLElement,
+        SVGElement: happyWindow.SVGElement,
+        HTMLIFrameElement: happyWindow.HTMLIFrameElement,
+        customElements: happyWindow.customElements,
+        localStorage: happyWindow.localStorage,
+        fetch: async () => new Response(JSON.stringify({ home: '/home' }), { headers: { 'Content-Type': 'application/json' } }),
+        getComputedStyle: happyWindow.getComputedStyle.bind(happyWindow),
+        ResizeObserver: happyWindow.ResizeObserver,
+        requestAnimationFrame: happyWindow.requestAnimationFrame.bind(happyWindow),
+        cancelAnimationFrame: happyWindow.cancelAnimationFrame.bind(happyWindow),
+        IS_REACT_ACT_ENVIRONMENT: true,
+    };
+
+    for (const name of DOM_GLOBAL_NAMES) {
+        Object.defineProperty(globalThis, name, { value: values[name], configurable: true, writable: true });
+    }
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+
+    return {
+        container,
+        restore: () => {
+            for (const [name, descriptor] of previous) {
+                if (descriptor) {
+                    Object.defineProperty(globalThis, name, descriptor);
+                } else {
+                    Reflect.deleteProperty(globalThis, name);
+                }
+            }
+            void happyWindow.happyDOM.close();
+        },
     };
 };
 
@@ -209,5 +300,53 @@ describe('ProgressiveGroup tool activity rows', () => {
             'bash-1',
         ]);
         expect(run?.nextIndex).toBe(3);
+    });
+});
+
+describe('Tool activity group disclosure', () => {
+    let dom: ReturnType<typeof installDom>;
+    let root: Root;
+
+    beforeEach(async () => {
+        dom = installDom();
+        ({ default: ProgressiveGroup } = await import('./ProgressiveGroup'));
+        root = createRoot(dom.container);
+    });
+
+    afterEach(async () => {
+        await act(async () => root.unmount());
+        dom.restore();
+    });
+
+    test('allows a user to collapse a live auto-expanded group', async () => {
+        await act(async () => root.render(
+            <I18nProvider>
+                <ProgressiveGroup
+                    parts={[
+                        makeToolActivity('read-running', 'read', 'running'),
+                        makeToolActivity('read-completed', 'read'),
+                    ]}
+                    isExpanded={true}
+                    onToggle={() => undefined}
+                    isMobile={false}
+                    expandedTools={new Set()}
+                    onToggleTool={() => undefined}
+                    onShowPopup={() => undefined}
+                    streamPhase="streaming"
+                    showHeader={false}
+                    animateRows={false}
+                />
+            </I18nProvider>,
+        ));
+
+        const header = dom.container.querySelector<HTMLButtonElement>('button[aria-expanded]');
+        if (!header) {
+            throw new Error('Expected an activity group disclosure button');
+        }
+        expect(header.getAttribute('aria-expanded')).toBe('true');
+
+        await act(async () => header.click());
+
+        expect(header.getAttribute('aria-expanded')).toBe('false');
     });
 });

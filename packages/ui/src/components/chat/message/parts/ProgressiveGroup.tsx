@@ -500,6 +500,11 @@ const areToolActivitySummaryPartsEqual = (
     });
 };
 
+type ActivityGroupExpansion = {
+    expanded: boolean;
+    source: 'auto' | 'user';
+};
+
 const ToolActivityGroupRow: React.FC<ToolActivityGroupRowProps> = ({
     activities,
     summaryParts,
@@ -511,11 +516,19 @@ const ToolActivityGroupRow: React.FC<ToolActivityGroupRowProps> = ({
     animateTailText,
 }) => {
     const { t } = useI18n();
-    const [isManuallyExpanded, setIsManuallyExpanded] = React.useState(false);
     const hasRunningActivity = React.useMemo(() => activities.some(isActivityRunning), [activities]);
     const hasStreamingReasoning = streamPhase !== 'completed'
         && activities.some((activity) => activity.kind === 'reasoning');
-    const isExpanded = isManuallyExpanded || hasRunningActivity || hasStreamingReasoning;
+    // Live groups open automatically until the user chooses a state. Keep
+    // that choice authoritative while more activity updates arrive.
+    const autoExpanded = hasRunningActivity || hasStreamingReasoning;
+    const [expansion, setExpansion] = React.useState<ActivityGroupExpansion>(() => ({
+        expanded: autoExpanded,
+        source: 'auto',
+    }));
+    const isExpanded = expansion.source === 'auto'
+        ? autoExpanded && expansion.expanded
+        : expansion.expanded;
     const summary = React.useMemo(() => summaryParts.map((part, index) => (
         t(getToolActivitySummaryKey(part, index === 0))
     )).join(', '), [summaryParts, t]);
@@ -523,6 +536,22 @@ const ToolActivityGroupRow: React.FC<ToolActivityGroupRowProps> = ({
     const icon = leadingToolName?.kind === 'tool' && leadingToolName.part.type === 'tool'
         ? getToolIcon(leadingToolName.part.tool)
         : <Icon name="brain-ai-3" className="h-3.5 w-3.5" />;
+
+    const handleToggle = React.useCallback(() => {
+        setExpansion({ expanded: !isExpanded, source: 'user' });
+    }, [isExpanded]);
+
+    React.useLayoutEffect(() => {
+        setExpansion((previous) => {
+            if (previous.source === 'user') {
+                return previous;
+            }
+            if (previous.expanded === autoExpanded) {
+                return previous;
+            }
+            return { expanded: autoExpanded, source: 'auto' };
+        });
+    }, [autoExpanded]);
 
     const renderActivity = (activity: TurnActivityPart): React.ReactNode => {
         if (activity.kind === 'reasoning') {
@@ -558,7 +587,7 @@ const ToolActivityGroupRow: React.FC<ToolActivityGroupRowProps> = ({
             <button
                 type="button"
                 aria-expanded={isExpanded}
-                onClick={() => setIsManuallyExpanded((expanded) => !expanded)}
+                onClick={handleToggle}
                 className="group/tool flex w-full min-w-0 items-center gap-x-1.5 rounded-xl px-0.5 py-1.5 text-left"
             >
                 <Icon
@@ -580,7 +609,15 @@ const ToolActivityGroupRow: React.FC<ToolActivityGroupRowProps> = ({
                         className="pointer-events-none absolute left-0 top-0 bottom-0 w-px"
                         style={{ backgroundColor: 'var(--tools-border)' }}
                     />
-                    <div className="space-y-1.5">
+                    {/* Child rows carry their own vertical padding. Do not add
+                        another gap between them in the expanded timeline. */}
+                    <div
+                        className={cn(
+                            'space-y-0',
+                            '[&_.oc-static-tool-row]:!py-0.5',
+                            '[&_[role="button"]]:!py-0.5',
+                        )}
+                    >
                         {activities.map((activity) => (
                             <React.Fragment key={activity.id}>{renderActivity(activity)}</React.Fragment>
                         ))}
