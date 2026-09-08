@@ -841,6 +841,32 @@ describe('updateDesktopSettings', () => {
     }
   });
 
+  test('autosaves the first model preference change', async () => {
+    getWindow();
+    const saveCalls: Array<Partial<SettingsPayload>> = [];
+    registerSettingsSave(async (changes) => {
+      saveCalls.push(changes);
+      return changes as SettingsPayload;
+    });
+    const stop = startModelPrefsAutoSave();
+
+    try {
+      useUIStore.setState({ favoriteModels: [{ providerID: 'anthropic', modelID: 'claude-haiku-4' }] });
+      await delay(300);
+
+      expect(saveCalls).toEqual([{
+        favoriteModels: [{ providerID: 'anthropic', modelID: 'claude-haiku-4' }],
+        hiddenModels: [],
+        collapsedModelProviders: [],
+        recentModels: [],
+        recentAgents: [],
+        recentEfforts: {},
+      }]);
+    } finally {
+      stop();
+    }
+  });
+
   test('autosaves appearance preferences to shared settings', async () => {
     getWindow();
     useUIStore.getState().setTerminalShell('auto');
@@ -1360,6 +1386,32 @@ describe('unload lifecycle flush (#2197)', () => {
     } finally {
       useUIStore.getState().setShowDeletionDialog(true);
       // Let the restore write drain so it cannot leak into other tests.
+      await delay(300);
+    }
+  });
+
+  test('persists a first model preference followed by an immediate unload', async () => {
+    const saveCalls: Array<Partial<SettingsPayload>> = [];
+    registerSettingsSave(async (changes) => {
+      saveCalls.push(changes);
+      return {};
+    });
+    const stopModelPrefs = startModelPrefsAutoSave();
+
+    try {
+      useUIStore.setState({ favoriteModels: [{ providerID: 'anthropic', modelID: 'claude-haiku-4' }] });
+      getWindow().dispatchEvent(new Event('pagehide'));
+
+      expect(saveCalls).toEqual([{
+        favoriteModels: [{ providerID: 'anthropic', modelID: 'claude-haiku-4' }],
+        hiddenModels: [],
+        collapsedModelProviders: [],
+        recentModels: [],
+        recentAgents: [],
+        recentEfforts: {},
+      }]);
+    } finally {
+      stopModelPrefs();
       await delay(300);
     }
   });
