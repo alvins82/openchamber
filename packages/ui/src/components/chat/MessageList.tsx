@@ -7,8 +7,6 @@ import { isSkippedTimelineRole, isTimelineNoticeRole } from './lib/timelineRoles
 import { filterVisibleParts, isEmptyTextPart } from './message/partUtils';
 import { areOptionalRenderRelevantMessagesEqual, areRelevantTurnGroupingContextsEqual, areRenderRelevantMessagesEqual } from './message/renderCompare';
 import TurnItem from './components/TurnItem';
-import { LiveTurnActivity } from './components/LiveTurnActivity';
-import { getTurnsWithLaterAssistant, hasLiveActivity } from './lib/turns/liveActivity';
 import type { ChatMessageEntry, TurnRecord, TurnGroupingContext } from './lib/turns/types';
 import { useTurnRecords } from './hooks/useTurnRecords';
 import { applyRetryOverlay } from './lib/turns/applyRetryOverlay';
@@ -160,10 +158,9 @@ type RenderEntry =
         previousMessage?: ChatMessageEntry;
         nextMessage?: ChatMessageEntry;
     }
-    | { kind: 'turn'; key: string; turn: TurnRecord; isLastTurn: boolean; hasLaterAssistant?: boolean; nextEntryFirstMessage?: ChatMessageEntry };
+    | { kind: 'turn'; key: string; turn: TurnRecord; isLastTurn: boolean; nextEntryFirstMessage?: ChatMessageEntry };
 
-type TurnUiState = { isExpanded: boolean; isLiveExpanded?: boolean };
-type ToggleTurnGroup = (turnId: string, mode?: 'sorted' | 'live') => void;
+type TurnUiState = { isExpanded: boolean; isWorkedForExpanded: boolean };
 
 
 
@@ -236,13 +233,12 @@ MessageRow.displayName = 'MessageRow';
 
 interface TurnBlockProps {
     turn: TurnRecord;
-    hasLaterAssistant?: boolean;
     isLastTurn: boolean;
     nextEntryFirstMessage?: ChatMessageEntry;
     sessionIsWorking: boolean;
     defaultActivityExpanded: boolean;
     turnUiStates: Map<string, TurnUiState>;
-    onToggleTurnGroup: ToggleTurnGroup;
+    onToggleTurnGroup: (turnId: string, group?: 'activity' | 'worked-for') => void;
     chatRenderMode: 'sorted' | 'live';
     scrollToBottom?: () => void;
     stickyUserHeader?: boolean;
@@ -255,7 +251,6 @@ interface TurnBlockProps {
 
 const TurnBlock = React.memo(({
     turn,
-    hasLaterAssistant = false,
     isLastTurn,
     nextEntryFirstMessage,
     sessionIsWorking,
@@ -277,12 +272,15 @@ const TurnBlock = React.memo(({
         () => isHiddenUserMessage(turn.userMessage),
         [turn.userMessage]
     );
-    const turnUiState = turnUiStates.get(turn.turnId) ?? { isExpanded: defaultActivityExpanded };
+    const turnUiState = turnUiStates.get(turn.turnId) ?? {
+        isExpanded: defaultActivityExpanded,
+        isWorkedForExpanded: false,
+    };
     const handleToggleTurnGroup = React.useCallback(() => {
-        onToggleTurnGroup(turn.turnId);
+        onToggleTurnGroup(turn.turnId, 'activity');
     }, [onToggleTurnGroup, turn.turnId]);
-    const handleToggleLiveActivity = React.useCallback(() => {
-        onToggleTurnGroup(turn.turnId, 'live');
+    const handleToggleWorkedFor = React.useCallback(() => {
+        onToggleTurnGroup(turn.turnId, 'worked-for');
     }, [onToggleTurnGroup, turn.turnId]);
 
     const messageOrder = React.useMemo(() => {
@@ -436,8 +434,12 @@ const TurnBlock = React.memo(({
             changedFiles: turn.changedFiles,
             userMessageCreatedAt: typeof userCreatedAt === 'number' ? userCreatedAt : undefined,
             assistantVariant,
+            summarySourceMessageId: turn.summary.sourceMessageId,
+            summarySourcePartId: turn.summary.sourcePartId,
+            turnCompletedAt: turn.completedAt,
+            turnDurationMs: turn.durationMs,
         };
-    }, [turn.changedFiles, turn.diffStats, turn.hasReasoning, turn.hasTools, turn.headerMessageId, turn.summaryText, turn.turnId, turn.assistantMessages, turn.userMessage.info, visibleActivityParts, visibleActivitySegments]);
+    }, [turn.assistantMessages, turn.changedFiles, turn.completedAt, turn.diffStats, turn.durationMs, turn.hasReasoning, turn.hasTools, turn.headerMessageId, turn.summary.sourceMessageId, turn.summary.sourcePartId, turn.summaryText, turn.turnId, turn.userMessage.info, visibleActivityParts, visibleActivitySegments]);
 
     const renderMessage = React.useCallback(
         (message: ChatMessageEntry) => {
@@ -477,10 +479,14 @@ const TurnBlock = React.memo(({
                     )),
                     isLatestTurn: isLastTurn,
                     isWorking: isLastTurn && sessionIsWorking && (
-                        chatRenderMode === 'sorted'
-                            ? hasAnchoredActivitySegment
-                            : message.info.id === streamingAssistantMessageId
+                        message.info.id === streamingAssistantMessageId
+                        || (chatRenderMode === 'sorted' && hasAnchoredActivitySegment)
                     ),
+                    isTurnWorking: isLastTurn && sessionIsWorking,
+                    isWorkedForExpanded: turnUiState.isWorkedForExpanded,
+                    toggleWorkedFor: handleToggleWorkedFor,
+                    summarySourceMessageId: turnGroupingContextBase.summarySourceMessageId,
+                    summarySourcePartId: turnGroupingContextBase.summarySourcePartId,
                     hasTools: turn.hasTools,
                     hasReasoning: turn.hasReasoning,
                     ...(shouldAttachFullTurnContext ? {
@@ -492,6 +498,8 @@ const TurnBlock = React.memo(({
                         changedFiles: turnGroupingContextBase.changedFiles,
                         userMessageCreatedAt: turnGroupingContextBase.userMessageCreatedAt,
                         assistantVariant: turnGroupingContextBase.assistantVariant,
+                        turnCompletedAt: turnGroupingContextBase.turnCompletedAt,
+                        turnDurationMs: turnGroupingContextBase.turnDurationMs,
                         isGroupExpanded: turnUiState.isExpanded,
                         toggleGroup: handleToggleTurnGroup,
                     } : {}),
@@ -529,6 +537,7 @@ const TurnBlock = React.memo(({
             turn.turnId,
             turn.userMessage,
             turnUiState.isExpanded,
+            turnUiState.isWorkedForExpanded,
             turnGroupingContextBase,
             streamingAssistantMessageId,
             activeStreamingPhase,
@@ -540,6 +549,7 @@ const TurnBlock = React.memo(({
             shouldAnimateUserMessage,
             onUserAnimationConsumed,
             handleToggleTurnGroup,
+            handleToggleWorkedFor,
         ]
     );
 
@@ -558,15 +568,6 @@ const TurnBlock = React.memo(({
             turn={renderableTurn}
             stickyUserHeader={stickyUserHeader && !userMessageHidden}
             renderMessage={renderMessage}
-            assistantContent={chatRenderMode === 'live' && !defaultActivityExpanded && hasLiveActivity(turn, showReasoningTraces) ? (
-                <LiveTurnActivity
-                    turn={renderableTurn}
-                    hasLaterAssistant={hasLaterAssistant}
-                    expanded={turnUiState.isLiveExpanded === true}
-                    onToggle={handleToggleLiveActivity}
-                    renderMessage={renderMessage}
-                />
-            ) : undefined}
         />
     );
 });
@@ -620,7 +621,7 @@ interface MessageListEntryProps {
     sessionIsWorking: boolean;
     defaultActivityExpanded: boolean;
     turnUiStates: Map<string, TurnUiState>;
-    onToggleTurnGroup: ToggleTurnGroup;
+    onToggleTurnGroup: (turnId: string, group?: 'activity' | 'worked-for') => void;
     chatRenderMode: 'sorted' | 'live';
     shouldAnimateUserMessage: (message: ChatMessageEntry) => boolean;
     onUserAnimationConsumed: (messageId: string) => void;
@@ -676,7 +677,6 @@ const MessageListEntry = React.memo(({
     return (
         <TurnBlock
             turn={entry.turn}
-            hasLaterAssistant={entry.hasLaterAssistant}
             isLastTurn={entry.isLastTurn}
             nextEntryFirstMessage={entry.nextEntryFirstMessage}
             sessionIsWorking={sessionIsWorking}
@@ -705,7 +705,7 @@ type TimelineRowContextValue = {
     stickyUserHeader: boolean;
     defaultActivityExpanded: boolean;
     turnUiStates: Map<string, TurnUiState>;
-    onToggleTurnGroup: ToggleTurnGroup;
+    onToggleTurnGroup: (turnId: string, group?: 'activity' | 'worked-for') => void;
     chatRenderMode: 'sorted' | 'live';
     showTurnChangedFiles: boolean;
     shouldAnimateUserMessage: (message: ChatMessageEntry) => boolean;
@@ -930,7 +930,7 @@ const StreamingTailContent: React.FC<{
     sessionIsWorking: boolean;
     defaultActivityExpanded: boolean;
     turnUiStates: Map<string, TurnUiState>;
-    onToggleTurnGroup: ToggleTurnGroup;
+    onToggleTurnGroup: (turnId: string, group?: 'activity' | 'worked-for') => void;
     chatRenderMode: 'sorted' | 'live';
     showTurnChangedFiles: boolean;
     shouldAnimateUserMessage: (message: ChatMessageEntry) => boolean;
@@ -1027,6 +1027,10 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
         previousOrder: string[];
         animatedIds: Set<string>;
     }>({ sessionKey: undefined, previousOrder: [], animatedIds: new Set() });
+    const workedForTurnRef = React.useRef<{ sessionKey: string; turnId: string | null }>({
+        sessionKey,
+        turnId: null,
+    });
     const stableScrollToBottom = useStableEvent(() => {
         scrollToBottom?.();
     });
@@ -1035,12 +1039,15 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
         setTurnUiStates(new Map());
     }, [activityRenderMode, sessionKey]);
 
-    const toggleTurnGroup = React.useCallback((turnId: string, mode: 'sorted' | 'live' = 'sorted') => {
+    const toggleTurnGroup = React.useCallback((turnId: string, group: 'activity' | 'worked-for' = 'activity') => {
         setTurnUiStates((previous) => {
             const next = new Map(previous);
-            const current = next.get(turnId) ?? { isExpanded: defaultActivityExpanded };
-            next.set(turnId, mode === 'live'
-                ? { ...current, isLiveExpanded: !current.isLiveExpanded }
+            const current = next.get(turnId) ?? {
+                isExpanded: defaultActivityExpanded,
+                isWorkedForExpanded: false,
+            };
+            next.set(turnId, group === 'worked-for'
+                ? { ...current, isWorkedForExpanded: !current.isWorkedForExpanded }
                 : { ...current, isExpanded: !current.isExpanded });
             return next;
         });
@@ -1107,16 +1114,32 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
         showTextJustificationActivity: chatRenderMode === 'sorted',
         showTurnChangedFiles,
     });
-    const hasUngroupedStaticEntries = projection.ungroupedMessageIds.size > 0;
-    const tailHasAssistant = Boolean(streamingTurn?.assistantMessages.length);
-    const turnsWithLaterAssistant = React.useMemo(() => {
-        if (chatRenderMode !== 'live' || defaultActivityExpanded) return new Set<string>();
-        const retired = getTurnsWithLaterAssistant(staticTurns);
-        if (tailHasAssistant) {
-            for (const turn of staticTurns) retired.add(turn.turnId);
+    const activeTurnId = sessionIsWorking ? projection.lastTurnId : null;
+
+    React.useEffect(() => {
+        const previous = workedForTurnRef.current;
+        if (previous.sessionKey !== sessionKey) {
+            workedForTurnRef.current = { sessionKey, turnId: activeTurnId };
+            return;
         }
-        return retired;
-    }, [chatRenderMode, defaultActivityExpanded, staticTurns, tailHasAssistant]);
+
+        const completedTurnId = previous.turnId;
+        if (completedTurnId !== null && completedTurnId !== activeTurnId) {
+            setTurnUiStates((current) => {
+                const turnState = current.get(completedTurnId);
+                if (!turnState || !turnState.isWorkedForExpanded) {
+                    return current;
+                }
+
+                const next = new Map(current);
+                next.set(completedTurnId, { ...turnState, isWorkedForExpanded: false });
+                return next;
+            });
+        }
+
+        workedForTurnRef.current = { sessionKey, turnId: activeTurnId };
+    }, [activeTurnId, sessionKey]);
+    const hasUngroupedStaticEntries = projection.ungroupedMessageIds.size > 0;
     const staticEntryMessages = hasUngroupedStaticEntries ? displayMessages : EMPTY_STATIC_ENTRY_MESSAGES;
     const staticEntryUngroupedIds = hasUngroupedStaticEntries ? projection.ungroupedMessageIds : EMPTY_UNGROUPED_MESSAGE_IDS;
     const staticRenderEntries = React.useMemo<RenderEntry[]>(() => streamPerfMeasure('ui.message_list.render_entries_ms', () => {
@@ -1125,7 +1148,6 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
             key: `turn:${turn.turnId}`,
             turn,
             isLastTurn: turn.turnId === projection.lastTurnId,
-            hasLaterAssistant: turnsWithLaterAssistant.has(turn.turnId),
         }));
 
         if (staticEntryUngroupedIds.size === 0) {
@@ -1159,7 +1181,7 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
         });
 
         return orderedEntries;
-    }), [projection.lastTurnId, staticEntryMessages, staticEntryUngroupedIds, staticTurns, turnsWithLaterAssistant]);
+    }), [projection.lastTurnId, staticEntryMessages, staticEntryUngroupedIds, staticTurns]);
 
     const trailingStreamingEntry = React.useMemo<RenderEntry | undefined>(() => {
         if (streamingTurn) {

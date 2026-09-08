@@ -131,6 +131,13 @@ export interface TurnGroupingContext {
     /** Model variant ("thinking" etc.) the turn ran with, read off its assistant messages. */
     assistantVariant?: string;
     isWorking: boolean;
+    isTurnWorking: boolean;
+    isWorkedForExpanded: boolean;
+    summarySourceMessageId?: string;
+    summarySourcePartId?: string;
+    turnCompletedAt?: number;
+    turnDurationMs?: number;
     isGroupExpanded?: boolean;
     toggleGroup?: () => void;
+    toggleWorkedFor?: () => void;
 }

@@ -9,7 +9,7 @@ import ReasoningPart from './parts/ReasoningPart';
 import { MessageFilesDisplay } from '../FileAttachment';
 import type { ToolPart as ToolPartType } from '@/lib/opencode/model';
 import type { StreamPhase, ToolPopupContent, AgentMentionInfo } from './types';
-import type { TurnActivityGroup, TurnChangedFile, TurnGroupingContext } from '../lib/turns/types';
+import type { TurnActivityGroup, TurnActivityRecord, TurnChangedFile, TurnGroupingContext } from '../lib/turns/types';
 import { cn } from '@/lib/utils';
 import { isEmptyTextPart, extractTextContent } from './partUtils';
 import { FadeInOnReveal } from './FadeInOnReveal';
@@ -38,13 +38,13 @@ import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 import { toast } from '@/components/ui';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Icon } from "@/components/icon/Icon";
-import { formatTimestampForDisplay } from './timeFormat';
+import { formatTimestampForDisplay, formatTurnDuration } from './timeFormat';
 import { ToolRevealOnMount } from './parts/ToolRevealOnMount';
 import { StaticToolRow } from './parts/ProgressiveGroup';
 import { isExpandableTool, isStandaloneTool } from './parts/toolRenderUtils';
+import { getContiguousActivityRun, isFailedToolActivity } from './parts/progressiveGroupRows';
 import TurnActivity from '../components/TurnActivity';
-import { LiveActivityCollapse } from '../components/LiveActivityCollapse';
-import { LiveFinalActivityContext } from '../components/liveActivityContext';
+import TurnWorkedFor from '../components/TurnWorkedFor';
 import { useProjectContextStore } from '@/stores/useProjectContextStore';
 import { resolveProjectForSessionDirectory } from '@/lib/projectResolution';
 import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
@@ -66,6 +66,28 @@ import { cloneMessageImageExportSource } from './imageExport';
 const CONTAIN_LAYOUT_STYLE = { contain: 'layout' as const, transform: 'translateZ(0)' };
 const MESSAGE_FOOTER_CONTAINER_STYLE = { containerType: 'inline-size' as const, containerName: 'message-footer' };
 const INLINE_MESSAGE_ACTIONS_CLASS_NAME = 'mt-2 mb-1 flex items-center justify-start gap-1.5';
+
+const getTextPartId = (messageId: string, part: Part, partIndex: number): string => {
+    const partId = part.id;
+    if (partId) {
+        return partId;
+    }
+    return `${messageId}-part-${partIndex}-text`;
+};
+
+const isTurnSummaryTextPart = (
+    turnGroupingContext: TurnGroupingContext | undefined,
+    messageId: string,
+    part: Part,
+    partIndex: number,
+): boolean => {
+    if (part.type !== 'text') {
+        return false;
+    }
+
+    return turnGroupingContext?.summarySourceMessageId === messageId
+        && turnGroupingContext.summarySourcePartId === getTextPartId(messageId, part, partIndex);
+};
 
 const getDisplayFileName = (file: string): string => {
     const normalized = file.replace(/\\/g, '/');
@@ -199,16 +221,6 @@ const TurnChangedFilePills = React.memo(({ files, isInteractive }: { files?: Tur
         </Collapsible>
     );
 });
-
-const formatTurnDuration = (durationMs: number): string => {
-    const totalSeconds = durationMs / 1000;
-    if (totalSeconds < 60) {
-        return `${totalSeconds.toFixed(1)}s`;
-    }
-    const minutes = Math.floor(totalSeconds / 60);
-    const seconds = Math.round(totalSeconds % 60);
-    return `${minutes}m ${seconds}s`;
-};
 
 interface MessageBodyProps {
     sessionId?: string;
@@ -1096,7 +1108,20 @@ const AssistantMessageBody = React.memo(({
     const animateActivityRows = awaitingMessageCompletion || Boolean(turnGroupingContext?.isWorking);
 
     const visibleParts = React.useMemo(() => {
-        return parts.filter((part) => !isEmptyTextPart(part));
+        return parts
+            .filter((part) => !isEmptyTextPart(part))
+            .filter((part) => {
+                const rawPart = part as Record<string, unknown>;
+                return rawPart.type !== 'compaction';
+            });
+    }, [parts]);
+
+    const partIndexByReference = React.useMemo(() => {
+        const indexes = new Map<Part, number>();
+        parts.forEach((part, partIndex) => {
+            indexes.set(part, partIndex);
+        });
+        return indexes;
     }, [parts]);
 
     const toolParts = React.useMemo(() => {
@@ -1274,7 +1299,6 @@ const AssistantMessageBody = React.memo(({
     const timeFormatPreference = useUIStore((state) => state.timeFormatPreference);
     const vscodeApi = useRuntimeAPIs().vscode;
     const isSortedRenderMode = chatRenderMode === 'sorted';
-    const liveFinalActivity = React.useContext(LiveFinalActivityContext);
     const collapsedPreviewCount = 7;
     const isLastAssistantInTurn = turnGroupingContext?.isLastAssistantInTurn ?? false;
     const hasStopFinish = messageFinish === 'stop';
@@ -1562,6 +1586,43 @@ const AssistantMessageBody = React.memo(({
 
     const hasAnchoredActivitySegments = activityGroupSegmentsForMessage.length > 0;
 
+    const hasVisibleWorkedForActivity = React.useMemo(() => {
+        const activities = turnGroupingContext?.activityParts;
+        if (!activities || activities.length === 0) {
+            return false;
+        }
+
+        return activities.some((activity) => {
+            if (activity.kind === 'tool') {
+                return true;
+            }
+            if (activity.kind === 'reasoning') {
+                return showReasoningTraces && collapsibleThinkingBlocks;
+            }
+            return isSortedRenderMode;
+        });
+    }, [collapsibleThinkingBlocks, isSortedRenderMode, showReasoningTraces, turnGroupingContext?.activityParts]);
+
+    const shouldHideWorkedForContent = Boolean(
+        turnGroupingContext
+        && !turnGroupingContext.isTurnWorking
+        && !turnGroupingContext.isWorkedForExpanded,
+    );
+    const isTurnWorking = turnGroupingContext?.isTurnWorking === true;
+    const toggleWorkedFor = turnGroupingContext?.toggleWorkedFor;
+
+    const shouldRenderWorkedFor = Boolean(
+        turnGroupingContext?.isFirstAssistantInTurn
+        && toggleWorkedFor
+        && (
+            isTurnWorking
+            || hasVisibleWorkedForActivity
+            || turnGroupingContext.hasTools
+            || (showReasoningTraces && collapsibleThinkingBlocks && turnGroupingContext.hasReasoning)
+            || Boolean(turnGroupingContext.summarySourceMessageId)
+        ),
+    );
+
     const activityByPart = React.useMemo(() => {
         const byRef = new Map<Part, (typeof activityPartsForTurn)[number]>();
         const byId = new Map<string, (typeof activityPartsForTurn)[number]>();
@@ -1588,6 +1649,49 @@ const AssistantMessageBody = React.memo(({
         };
     }, [activityPartsForTurn]);
 
+    const liveActivityParts = React.useMemo<Array<TurnActivityRecord | null>>(() => {
+        return visibleParts.map((part, visiblePartIndex) => {
+            const partIndex = partIndexByReference.get(part) ?? visiblePartIndex;
+            if (part.type === 'tool') {
+                if (!shouldShowTool(part)) {
+                    return null;
+                }
+
+                const existing = activityByPart.get(part);
+                if (existing?.kind === 'tool') {
+                    return existing;
+                }
+
+                return {
+                    id: part.id ?? `${messageId}-part-${partIndex}-tool`,
+                    turnId: turnGroupingContext?.turnId ?? messageId,
+                    messageId,
+                    part,
+                    partIndex,
+                    kind: 'tool' as const,
+                };
+            }
+
+            if (part.type !== 'reasoning' || !showReasoningTraces || !collapsibleThinkingBlocks) {
+                return null;
+            }
+
+            const existing = activityByPart.get(part);
+            if (existing?.kind === 'reasoning') {
+                return existing;
+            }
+
+            return {
+                id: part.id ?? `${messageId}-part-${partIndex}-reasoning`,
+                turnId: turnGroupingContext?.turnId ?? messageId,
+                messageId,
+                part,
+                partIndex,
+                kind: 'reasoning' as const,
+            };
+        });
+    }, [activityByPart, collapsibleThinkingBlocks, messageId, partIndexByReference, shouldShowTool, showReasoningTraces, turnGroupingContext?.turnId, visibleParts]);
+
     const toggleActivityGroup = turnGroupingContext?.toggleGroup;
     const isActivityOwnerMessage = !isSortedRenderMode
         || !turnGroupingContext?.activityOwnerMessageId
@@ -1597,6 +1701,7 @@ const AssistantMessageBody = React.memo(({
     const shouldRenderActivityGroup = isSortedRenderMode
         && isActivityOwnerMessage
         && hasAnchoredActivitySegments
+        && !shouldHideWorkedForContent
         && Boolean(toggleActivityGroup);
 
     // A message that asked a question is blocked until the user answers — it
@@ -1694,10 +1799,7 @@ const AssistantMessageBody = React.memo(({
     const shouldRenderStandaloneActionsAfterContent = shouldShowStandaloneMessageActions && lastRenderableTextPartIndex < 0;
 
     const renderedParts = React.useMemo(() => {
-        const answerRendered: React.ReactNode[] = [];
-        const activityRendered: React.ReactNode[] = [];
-        let rendered = answerRendered;
-        const splitLiveActivity = !isSortedRenderMode && liveFinalActivity?.messageId === messageId && hasStopFinish;
+        const rendered: React.ReactNode[] = [];
         let hasRenderedAnswerText = false;
         const isFinalLiveAnswer = chatRenderMode === 'live' && isLastAssistantInTurn && hasStopFinish;
         const hasEarlierVisibleActivity = isFinalLiveAnswer && Boolean(turnGroupingContext?.activityParts?.some((activity) => {
@@ -1746,7 +1848,8 @@ const AssistantMessageBody = React.memo(({
         // after that tool's row so e.g. an Agent Task sits chronologically
         // between the activity before it and the activity after it.
         const localToolPartIds = new Set<string>();
-        visibleParts.forEach((part, partIndex) => {
+        visibleParts.forEach((part, visiblePartIndex) => {
+            const partIndex = partIndexByReference.get(part) ?? visiblePartIndex;
             if (part.type === 'tool') {
                 localToolPartIds.add(part.id ?? `${messageId}-part-${partIndex}-${part.type}`);
             }
@@ -1788,10 +1891,26 @@ const AssistantMessageBody = React.memo(({
         let i = 0;
         while (i < visibleParts.length) {
             const part = visibleParts[i];
-            rendered = splitLiveActivity && part.type !== 'text' ? activityRendered : answerRendered;
 
             if (part.type === 'text') {
                 const activity = activityByPart.get(part);
+                // The Worked for group only folds intermediate assistant prose
+                // after the turn settles. The projected summary part remains
+                // the visible final response; while working, all text stays visible.
+                if (
+                    shouldHideWorkedForContent
+                    && turnGroupingContext?.summarySourceMessageId
+                    && turnGroupingContext.summarySourcePartId
+                    && !isTurnSummaryTextPart(
+                        turnGroupingContext,
+                        messageId,
+                        part,
+                        partIndexByReference.get(part) ?? i,
+                    )
+                ) {
+                    i += 1;
+                    continue;
+                }
                 if (shouldDeferSortedInlineText) {
                     i += 1;
                     continue;
@@ -1800,7 +1919,7 @@ const AssistantMessageBody = React.memo(({
                     i += 1;
                     continue;
                 }
-                if (isFinalLiveAnswer && !hasRenderedAnswerText && (rendered.length > 0 || activityRendered.length > 0 || hasEarlierVisibleActivity || turnGroupingContext?.hasEarlierAssistantText)) {
+                if (isFinalLiveAnswer && !hasRenderedAnswerText && (rendered.length > 0 || hasEarlierVisibleActivity || turnGroupingContext?.hasEarlierAssistantText)) {
                     rendered.push(
                         <div
                             key={`final-answer-divider-${messageId}`}
@@ -1836,6 +1955,53 @@ const AssistantMessageBody = React.memo(({
             }
 
             if (part.type === 'reasoning') {
+                if (shouldHideWorkedForContent && showReasoningTraces && collapsibleThinkingBlocks) {
+                    i += 1;
+                    continue;
+                }
+
+                if (!isSortedRenderMode && showReasoningTraces && collapsibleThinkingBlocks) {
+                    const liveActivityRun = getContiguousActivityRun(liveActivityParts, i);
+                    const hasToolActivity = liveActivityRun?.activities.some((activity) => activity.kind === 'tool') ?? false;
+                    if (liveActivityRun && hasToolActivity && liveActivityRun.activities.length > 1) {
+                        rendered.push(
+                            <TurnActivity
+                                key={`live-activity-group-${liveActivityRun.activities[0]?.id ?? `${messageId}-part-${i}`}`}
+                                parts={liveActivityRun.activities}
+                                isExpanded={true}
+                                onToggle={toggleActivityGroup ?? (() => undefined)}
+                                isMobile={isMobile}
+                                expandedTools={expandedTools}
+                                onToggleTool={onToggleTool}
+                                onShowPopup={onShowPopup}
+                                streamPhase={effectiveStreamPhase}
+                                showHeader={false}
+                                animateRows={animateActivityRows}
+                                animatedToolIds={animatedToolIdsLookup}
+                            />
+                        );
+                        i = liveActivityRun.nextIndex;
+                        continue;
+                    }
+                    if (liveActivityRun && !hasToolActivity) {
+                        liveActivityRun.activities.forEach((activity) => {
+                            if (activity.kind !== 'reasoning') {
+                                return;
+                            }
+                            rendered.push(
+                                <ReasoningPart
+                                    key={`reasoning-${activity.id}`}
+                                    part={activity.part}
+                                    messageId={activity.messageId}
+                                    streamPhase={effectiveStreamPhase}
+                                />
+                            );
+                        });
+                        i = liveActivityRun.nextIndex;
+                        continue;
+                    }
+                }
+
                 const activity = activityByPart.get(part);
                 if (activity?.kind === 'reasoning') {
                     i += 1;
@@ -1874,7 +2040,12 @@ const AssistantMessageBody = React.memo(({
             if (part.type === 'tool') {
                 const toolPart = part as ToolPartType;
                 const toolName = toolPart.tool?.toLowerCase() ?? '';
-                const toolPartId = toolPart.id ?? `${messageId}-part-${i}-${part.type}`;
+                const toolPartId = toolPart.id ?? `${messageId}-part-${partIndexByReference.get(part) ?? i}-${part.type}`;
+
+                if (shouldHideWorkedForContent) {
+                    i += 1;
+                    continue;
+                }
 
                 if (isSortedRenderMode && !isActivityOwnerMessage) {
                     flushSegmentsAfterTool(toolPartId);
@@ -1883,6 +2054,7 @@ const AssistantMessageBody = React.memo(({
                 }
 
                 const activity = activityByPart.get(part);
+                const liveActivity = liveActivityParts[i];
                 if (activity?.kind === 'tool' && !isStandaloneTool(toolName)) {
                     flushSegmentsAfterTool(toolPartId);
                     i += 1;
@@ -1895,8 +2067,32 @@ const AssistantMessageBody = React.memo(({
                     continue;
                 }
 
+                if (!isSortedRenderMode) {
+                    const liveActivityRun = getContiguousActivityRun(liveActivityParts, i);
+                    if (liveActivityRun && liveActivityRun.activities.length > 1) {
+                        rendered.push(
+                            <TurnActivity
+                                key={`live-tool-activity-group-${liveActivityRun.activities[0]?.id ?? toolPartId}`}
+                                parts={liveActivityRun.activities}
+                                isExpanded={true}
+                                onToggle={toggleActivityGroup ?? (() => undefined)}
+                                isMobile={isMobile}
+                                expandedTools={expandedTools}
+                                onToggleTool={onToggleTool}
+                                onShowPopup={onShowPopup}
+                                streamPhase={effectiveStreamPhase}
+                                showHeader={false}
+                                animateRows={animateActivityRows}
+                                animatedToolIds={animatedToolIdsLookup}
+                            />
+                        );
+                        i = liveActivityRun.nextIndex;
+                        continue;
+                    }
+                }
+
                 // Expandable tools: bash, edit, write, task, question — individual rows
-                if (isExpandableTool(toolName)) {
+                if (isExpandableTool(toolName) || (liveActivity?.kind === 'tool' && isFailedToolActivity(liveActivity))) {
                     rendered.push(
                         <FadeInOnReveal key={`tool-${toolPart.id}`}>
                             <ToolRevealOnMount animate={animatedToolIdsLookup.has(toolPart.id)} wipe>
@@ -1958,16 +2154,7 @@ const AssistantMessageBody = React.memo(({
             });
         });
 
-        if (splitLiveActivity && liveFinalActivity) {
-            return [
-                <LiveActivityCollapse key="final-message-activity" expanded={liveFinalActivity.expanded}
-                    id={liveFinalActivity.contentId} animateOnMount={liveFinalActivity.animateCollapse}>
-                    {activityRendered}
-                </LiveActivityCollapse>,
-                ...answerRendered,
-            ];
-        }
-        return answerRendered;
+        return rendered;
     }, [
         activityByPart,
         activityGroupSegmentsForMessage,
@@ -1981,17 +2168,19 @@ const AssistantMessageBody = React.memo(({
         isMobile,
         isActivityOwnerMessage,
         isSortedRenderMode,
-        liveFinalActivity,
         isLastAssistantInTurn,
         hasStopFinish,
         lastRenderableTextPartIndex,
+        liveActivityParts,
         messageId,
         messageActionButtons,
+        partIndexByReference,
         renderJustificationActions,
         sessionId,
         onShowPopup,
         onToggleTool,
         shouldRenderActivityGroup,
+        shouldHideWorkedForContent,
         shouldShowStandaloneMessageActions,
         shouldShowTool,
         effectiveStreamPhase,
@@ -2262,6 +2451,16 @@ const AssistantMessageBody = React.memo(({
                  <div
                      className="message-content-text leading-relaxed overflow-hidden text-foreground/90 [&_p:last-child]:mb-0 [&_ul:last-child]:mb-0 [&_ol:last-child]:mb-0"
                  >
+                    {shouldRenderWorkedFor ? (
+                        <TurnWorkedFor
+                            isExpanded={turnGroupingContext?.isWorkedForExpanded === true}
+                            isWorking={isTurnWorking}
+                            startedAt={turnGroupingContext?.userMessageCreatedAt}
+                            completedAt={turnGroupingContext?.turnCompletedAt}
+                            durationMs={turnGroupingContext?.turnDurationMs}
+                            onToggle={toggleWorkedFor ?? (() => undefined)}
+                        />
+                    ) : null}
                     {renderedParts}
                     {showErrorMessage && (
                         <FadeInOnReveal key="assistant-error">
