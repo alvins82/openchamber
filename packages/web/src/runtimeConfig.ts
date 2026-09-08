@@ -72,9 +72,6 @@ export const createConfiguredWebAPIs = (bootstrap?: EmbeddedSessionRuntimeBootst
       relay,
     });
   }
-  // createWebAPIs imports UI stores, which instantiate the SDK singleton before
-  // an embedded frame's asynchronous parent bootstrap is available.
-  opencodeClient.reconnectToRuntimeBaseUrl();
   void refreshRuntimeUrlAuthToken(apiBaseUrl || undefined).catch(() => {});
   if (localOrigin && !sameOrigin(apiBaseUrl, localOrigin) && Object.keys(getRuntimeExtraHeadersSync()).length > 0) {
     void refreshLocalRuntimeUrlAuthToken(localOrigin).catch(() => {});
@@ -104,5 +101,10 @@ export const createConfiguredWebAPIs = (bootstrap?: EmbeddedSessionRuntimeBootst
   void desktopRelayRestoreReady.then(() => {
     window.setTimeout(() => { void warmDesktopHostStatuses().catch(() => {}); }, HOST_STATUS_WARMUP_DELAY_MS);
   });
-  return createWebAPIs({ urls });
+  const runtimeApis = createWebAPIs({ urls });
+  // The shared SDK is created during module initialization, before this runtime
+  // configuration is applied. Rebind it after the web APIs are initialized so
+  // an external runtime cannot leave that client pointed at the UI origin.
+  opencodeClient.reconnectToRuntimeBaseUrl();
+  return runtimeApis;
 };
