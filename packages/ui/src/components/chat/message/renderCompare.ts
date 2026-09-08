@@ -295,6 +295,13 @@ export const areRelevantTurnGroupingContextsEqual = (
   if (left.isLastAssistantInTurn !== right.isLastAssistantInTurn) return false;
   if (left.isLatestTurn !== right.isLatestTurn) return false;
   if (left.isWorking !== right.isWorking) return false;
+  if (left.isTurnWorking !== right.isTurnWorking) return false;
+  if (left.isWorkedForExpanded !== right.isWorkedForExpanded) return false;
+  if (left.toggleWorkedFor !== right.toggleWorkedFor) return false;
+  if (left.summarySourceMessageId !== right.summarySourceMessageId) return false;
+  if (left.summarySourcePartId !== right.summarySourcePartId) return false;
+  if (left.turnCompletedAt !== right.turnCompletedAt) return false;
+  if (left.turnDurationMs !== right.turnDurationMs) return false;
   if (left.hasTools !== right.hasTools) return false;
   if (left.hasReasoning !== right.hasReasoning) return false;
   if (left.userMessageCreatedAt !== right.userMessageCreatedAt) return false;
