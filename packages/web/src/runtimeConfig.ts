@@ -102,9 +102,9 @@ export const createConfiguredWebAPIs = (bootstrap?: EmbeddedSessionRuntimeBootst
     window.setTimeout(() => { void warmDesktopHostStatuses().catch(() => {}); }, HOST_STATUS_WARMUP_DELAY_MS);
   });
   const runtimeApis = createWebAPIs({ urls });
-  // createWebAPIs installs the resolver used by shared runtime consumers. Rebind
-  // after that handoff so the SDK cannot retain the UI origin it saw during
-  // module initialization when the runtime is an external local server.
+  // The shared SDK is created during module initialization, before this runtime
+  // configuration is applied. Rebind it after the web APIs are initialized so
+  // an external runtime cannot leave that client pointed at the UI origin.
   opencodeClient.reconnectToRuntimeBaseUrl();
   return runtimeApis;
 };
