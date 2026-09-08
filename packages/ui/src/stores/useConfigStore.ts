@@ -20,7 +20,7 @@ import { runtimeFetch } from "@/lib/runtime-fetch";
 import { markStartupTrace, measureStartupTrace } from "@/lib/startupTrace";
 import { normalizePath } from "@/lib/pathNormalization";
 import { getSyncConfig, subscribeToSyncConfigChanges } from "@/sync/sync-refs";
-import { getRuntimeKey } from "@/lib/runtime-switch";
+import { getRuntimeKey, subscribeRuntimeEndpointChanged } from "@/lib/runtime-switch";
 
 const MODELS_DEV_API_URL = "https://models.dev/api.json";
 const MODELS_DEV_PROXY_URL = "/api/openchamber/models-metadata";
@@ -55,38 +55,64 @@ interface OpenChamberDefaults {
 // not per directory: one request serves the switches that land inside this
 // window, and concurrent activations share the in-flight one.
 const OPENCHAMBER_DEFAULTS_FRESH_MS = 15_000;
-let openChamberDefaultsCache: { at: number; request: Promise<OpenChamberDefaults> } | null = null;
+let openChamberDefaultsCache: {
+    at: number;
+    runtimeKey: string;
+    request: Promise<OpenChamberDefaults | null>;
+} | null = null;
+let openChamberDefaultsUserRevision = 0;
 
-const fetchOpenChamberDefaults = (): Promise<OpenChamberDefaults> => {
+const invalidateOpenChamberDefaultsCache = (): void => {
+    openChamberDefaultsCache = null;
+};
+
+const recordOpenChamberDefaultsChange = (): void => {
+    openChamberDefaultsUserRevision += 1;
+    invalidateOpenChamberDefaultsCache();
+};
+
+const fetchOpenChamberDefaults = (): Promise<OpenChamberDefaults | null> => {
     const now = Date.now();
-    if (openChamberDefaultsCache && now - openChamberDefaultsCache.at < OPENCHAMBER_DEFAULTS_FRESH_MS) {
+    const runtimeKey = getRuntimeKey();
+    if (
+        openChamberDefaultsCache
+        && openChamberDefaultsCache.runtimeKey === runtimeKey
+        && now - openChamberDefaultsCache.at < OPENCHAMBER_DEFAULTS_FRESH_MS
+    ) {
         return openChamberDefaultsCache.request;
     }
     const request = requestOpenChamberDefaults();
-    openChamberDefaultsCache = { at: now, request };
-    request.catch(() => {
-        if (openChamberDefaultsCache?.request === request) openChamberDefaultsCache = null;
+    const cacheEntry = { at: now, runtimeKey, request };
+    openChamberDefaultsCache = cacheEntry;
+    void request.then((result) => {
+        // A failed settings read must not become a 15-second authoritative
+        // empty result. The next directory activation should retry it.
+        if (result === null && openChamberDefaultsCache === cacheEntry) {
+            openChamberDefaultsCache = null;
+        }
+    }).catch(() => {
+        if (openChamberDefaultsCache === cacheEntry) openChamberDefaultsCache = null;
     });
     return request;
 };
 
-const requestOpenChamberDefaults = async (): Promise<OpenChamberDefaults> => {
+const requestOpenChamberDefaults = async (): Promise<OpenChamberDefaults | null> => {
     markStartupTrace('config.defaults:start');
     const started = typeof performance !== 'undefined' ? performance.now() : Date.now();
-    const finish = (source: string, result: OpenChamberDefaults) => {
+    const finish = (source: string, result: OpenChamberDefaults | null) => {
         const ended = typeof performance !== 'undefined' ? performance.now() : Date.now();
         markStartupTrace('config.defaults:end', {
             source,
             durationMs: Math.round(ended - started),
-            hasDefaultModel: Boolean(result.defaultModel),
-            hasDefaultAgent: Boolean(result.defaultAgent),
+            hasDefaultModel: Boolean(result?.defaultModel),
+            hasDefaultAgent: Boolean(result?.defaultAgent),
         });
         return result;
     };
     try {
         const data = await loadDesktopSettings();
         if (!data) {
-            return finish('settings-unavailable', {});
+            return finish('settings-unavailable', null);
         }
         const defaultModel = data.defaultModel?.trim() ?? '';
         const defaultVariant = data.defaultVariant?.trim() ?? '';
@@ -110,9 +136,11 @@ const requestOpenChamberDefaults = async (): Promise<OpenChamberDefaults> => {
         });
     } catch (error) {
         markStartupTrace('config.defaults:error', { error: error instanceof Error ? error.message : String(error) });
-        return finish('error', {});
+        return finish('error', null);
     }
 };
+
+subscribeRuntimeEndpointChanged(invalidateOpenChamberDefaultsCache);
 
 const parseModelString = (modelString: string): { providerId: string; modelId: string } | null => {
     return parseModelIdentifier(modelString);
@@ -2026,7 +2054,8 @@ export const useConfigStore = create<ConfigStore>()(
                             if (initialSyncedOpencodeConfig) {
                                 markStartupTrace('loadAgents:syncConfigHit', { directoryKey, source });
                             }
-                            const [agents, openChamberDefaults] = await Promise.all([
+                            const defaultsUserRevision = openChamberDefaultsUserRevision;
+                            const [agents, loadedOpenChamberDefaults] = await Promise.all([
                                 measureStartupTrace(
                                     'loadAgents:api',
                                     () => opencodeClient.listAgents(configDirectoryPath),
@@ -2034,6 +2063,37 @@ export const useConfigStore = create<ConfigStore>()(
                                 ),
                                 fetchOpenChamberDefaults(),
                             ]);
+
+                            // Keep the last known settings when the settings
+                            // request is unavailable. A transport failure is
+                            // not an authoritative empty document.
+                            const currentSettings = get();
+                            const defaultsChangedDuringLoad = defaultsUserRevision !== openChamberDefaultsUserRevision;
+                            let openChamberDefaults: OpenChamberDefaults;
+                            if (loadedOpenChamberDefaults) {
+                                openChamberDefaults = { ...loadedOpenChamberDefaults };
+                                if (defaultsChangedDuringLoad) {
+                                    openChamberDefaults.defaultModel = currentSettings.settingsDefaultModel;
+                                    openChamberDefaults.defaultVariant = currentSettings.settingsDefaultVariant;
+                                    openChamberDefaults.defaultAgent = currentSettings.settingsDefaultAgent;
+                                }
+                            } else {
+                                openChamberDefaults = {
+                                    defaultModel: currentSettings.settingsDefaultModel,
+                                    defaultVariant: currentSettings.settingsDefaultVariant,
+                                    defaultAgent: currentSettings.settingsDefaultAgent,
+                                    autoCreateWorktree: currentSettings.settingsAutoCreateWorktree,
+                                    gitmojiEnabled: currentSettings.settingsGitmojiEnabled,
+                                    defaultFileViewerPreview: currentSettings.settingsDefaultFileViewerPreview,
+                                    zenModel: currentSettings.settingsZenModel,
+                                    messageStreamTransport: currentSettings.settingsMessageStreamTransport,
+                                    sttProvider: currentSettings.sttProvider,
+                                    sttServerUrl: currentSettings.sttServerUrl,
+                                    sttModel: currentSettings.sttModel,
+                                    sttLocalModel: currentSettings.sttLocalModel,
+                                    sttLanguage: currentSettings.sttLanguage,
+                                };
+                            }
 
                             const safeAgents = Array.isArray(agents) ? agents : [];
 
@@ -2197,35 +2257,6 @@ export const useConfigStore = create<ConfigStore>()(
                                 return true;
                             }
 
-                            // Helper to validate model exists in providers
-                            const validateModel = (providerId: string, modelId: string): boolean => {
-                                const provider = providers.find((p) => p.id === providerId);
-                                if (!provider) return false;
-                                return provider.models.some((m) => m.id === modelId);
-                            };
-
-                            // Detect invalid OpenChamber settings so we can clear them from storage.
-                            // This is independent of resolution: even though the cascade below falls
-                            // back gracefully, stale settings pointing at removed agents/models/variants
-                            // should be cleaned up.
-                            const invalidSettings: { defaultModel?: string; defaultVariant?: string; defaultAgent?: string } = {};
-                            if (openChamberDefaults.defaultAgent && !safeAgents.some((agent) => agent.name === openChamberDefaults.defaultAgent)) {
-                                invalidSettings.defaultAgent = '';
-                            }
-                            if (openChamberDefaults.defaultModel) {
-                                const parsed = parseModelString(openChamberDefaults.defaultModel);
-                                if (!parsed || !validateModel(parsed.providerId, parsed.modelId)) {
-                                    invalidSettings.defaultModel = '';
-                                } else if (openChamberDefaults.defaultVariant) {
-                                    const provider = providers.find((p) => p.id === parsed.providerId);
-                                    const model = provider?.models.find((m) => m.id === parsed.modelId) as { variants?: Record<string, unknown> } | undefined;
-                                    const variants = model?.variants;
-                                    if (!(variants && Object.prototype.hasOwnProperty.call(variants, openChamberDefaults.defaultVariant))) {
-                                        invalidSettings.defaultVariant = '';
-                                    }
-                                }
-                            }
-
                             // Resolve agent + model via the shared cascade:
                             //   settings.defaultAgent → opencode default_agent → build → first primary → first
                             //   settings.defaultModel → resolved agent's model+variant → opencode/big-pickle → first
@@ -2308,19 +2339,6 @@ export const useConfigStore = create<ConfigStore>()(
 
                                 return nextState;
                             });
-
-                            // Clear invalid settings from storage (best-effort cleanup)
-                            if (Object.keys(invalidSettings).length > 0) {
-                                // Also clear from store state
-                                 set({
-                                     settingsDefaultModel: invalidSettings.defaultModel !== undefined ? undefined : get().settingsDefaultModel,
-                                     settingsDefaultVariant: invalidSettings.defaultVariant !== undefined ? undefined : get().settingsDefaultVariant,
-                                     settingsDefaultAgent: invalidSettings.defaultAgent !== undefined ? undefined : get().settingsDefaultAgent,
-                                 });
-                                updateDesktopSettings(invalidSettings).catch(() => {
-                                    // Ignore errors - best effort cleanup
-                                });
-                            }
 
                             const loaderEnded = typeof performance !== 'undefined' ? performance.now() : Date.now();
                             markStartupTrace('loadAgents:end', {
@@ -2872,14 +2890,17 @@ export const useConfigStore = create<ConfigStore>()(
                 },
 
                  setSettingsDefaultModel: (model: string | undefined) => {
+                     recordOpenChamberDefaultsChange();
                      set({ settingsDefaultModel: model });
                  },
 
                  setSettingsDefaultVariant: (variant: string | undefined) => {
+                     recordOpenChamberDefaultsChange();
                      set({ settingsDefaultVariant: variant });
                  },
  
                  setSettingsDefaultAgent: (agent: string | undefined) => {
+                     recordOpenChamberDefaultsChange();
                      set({ settingsDefaultAgent: agent });
                  },
 
