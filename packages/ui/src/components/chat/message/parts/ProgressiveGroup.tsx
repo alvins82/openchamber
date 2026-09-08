@@ -14,7 +14,8 @@ import { Icon } from "@/components/icon/Icon";
 import { FadeInOnReveal } from '../FadeInOnReveal';
 import { getToolIcon } from './toolPresentation';
 import { getToolMetadata } from '@/lib/toolHelpers';
-import { isExpandableTool, isStandaloneTool, isStaticTool } from './toolRenderUtils';
+import { aggregateRows, type AggregatedRow, type ToolActivitySummaryPart } from './progressiveGroupRows';
+import { isStaticTool } from './toolRenderUtils';
 import { RuntimeAPIContext } from '@/contexts/runtimeAPIContext';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useUIStore } from '@/stores/useUIStore';
@@ -25,6 +26,7 @@ import JustificationBlock from './JustificationBlock';
 import { areRenderRelevantPartsEqual } from '../renderCompare';
 import { getExternalFaviconUrl } from '@/lib/url';
 import { getDirectoryForFilePath, getRelativeFilePath, isFilePathWithinDirectory, normalizeFilePath, toAbsoluteFilePath } from '@/lib/path-utils';
+import { useI18n, type I18nKey } from '@/lib/i18n';
 
 const TOOL_ROW_TEXT_CLASS = '!text-[length:var(--text-meta)] !leading-5 sm:!leading-6 tracking-normal';
 const TOOL_ROW_TITLE_CLASS = cn('typography-meta font-medium', TOOL_ROW_TEXT_CLASS);
@@ -248,7 +250,7 @@ const renderReadFilePath = (displayPath: string, animate = true) => {
             <Text
                 variant={animate ? 'generate-effect' : 'static'}
                 className={cn('min-w-0 flex-1 truncate whitespace-nowrap', TOOL_ROW_DESCRIPTION_CLASS)}
-                style={{ color: 'var(--tools-title)' }}
+                style={{ color: 'var(--tools-description)' }}
                 title={displayPath}
             >
                 {displayPath}
@@ -279,7 +281,7 @@ const renderReadFilePath = (displayPath: string, animate = true) => {
             <Text
                 variant={animate ? 'generate-effect' : 'static'}
                 className="flex-shrink-0"
-                style={{ color: 'var(--tools-title)' }}
+                style={{ color: 'var(--tools-description)' }}
             >
                 {name}
             </Text>
@@ -360,13 +362,6 @@ const getToolShortDescription = (activity: TurnActivityPart): string | null => {
     // Fallback: try filename
     return getToolFileName(activity);
 };
-
-type AggregatedRow =
-    | { type: 'tool-expandable'; activity: TurnActivityPart }
-    | { type: 'tool-static-group'; toolName: string; activities: TurnActivityPart[] }
-    | { type: 'reasoning'; activity: TurnActivityPart }
-    | { type: 'justification'; activity: TurnActivityPart }
-    | { type: 'tool-fallback'; activity: TurnActivityPart };
 
 interface ExpandableToolRowProps {
     activity: TurnActivityPart;
@@ -463,61 +458,186 @@ const MemoStaticGroupedToolRow = React.memo(StaticGroupedToolRow, (prev, next) =
         && areActivityListsEqual(prev.activities, next.activities);
 });
 
-/**
- * Aggregate sorted activity parts into display rows.
- * Static tools are rendered as one row per call.
- * Reasoning/justification become inline text.
- * Expandable tools (edit, bash, write, question) stay as individual rows.
- * Unknown tools stay as individual expandable rows (fallback).
- */
-const aggregateRows = (parts: TurnActivityPart[]): AggregatedRow[] => {
-    const rows: AggregatedRow[] = [];
+interface ToolActivityGroupRowProps {
+    activities: TurnActivityPart[];
+    summaryParts: ToolActivitySummaryPart[];
+    streamPhase: StreamPhase;
+    isMobile: boolean;
+    expandedTools: Set<string>;
+    onToggleTool: (toolId: string) => void;
+    onShowPopup: (content: ToolPopupContent) => void;
+    animateTailText: boolean;
+}
 
-    let i = 0;
-    while (i < parts.length) {
-        const activity = parts[i];
-
-        if (activity.kind === 'reasoning') {
-            rows.push({ type: 'reasoning', activity });
-            i++;
-            continue;
-        }
-
-        if (activity.kind === 'justification') {
-            rows.push({ type: 'justification', activity });
-            i++;
-            continue;
-        }
-
-        // Tool part
-        const toolPart = activity.part as ToolPartType;
-        const toolName = toolPart.tool?.toLowerCase() ?? '';
-
-        if (isStandaloneTool(toolName)) {
-            // Standalone tools are rendered separately, skip
-            i++;
-            continue;
-        }
-
-        if (isExpandableTool(toolName)) {
-            rows.push({ type: 'tool-expandable', activity });
-            i++;
-            continue;
-        }
-
-        if (isStaticTool(toolName)) {
-            rows.push({ type: 'tool-static-group', toolName, activities: [activity] });
-            i++;
-            continue;
-        }
-
-        // Unknown/fallback tool — keep as expandable
-        rows.push({ type: 'tool-fallback', activity });
-        i++;
+const getToolActivitySummaryKey = (summaryPart: ToolActivitySummaryPart, isLeading: boolean): I18nKey => {
+    switch (summaryPart.category) {
+        case 'files':
+            if (summaryPart.count === 1) {
+                return isLeading ? 'chat.activity.editedFile' : 'chat.activity.editedFileFollowing';
+            }
+            return isLeading ? 'chat.activity.editedFiles' : 'chat.activity.editedFilesFollowing';
+        case 'commands':
+            if (summaryPart.count === 1) {
+                return isLeading ? 'chat.activity.ranCommand' : 'chat.activity.ranCommandFollowing';
+            }
+            return isLeading ? 'chat.activity.ranCommands' : 'chat.activity.ranCommandsFollowing';
+        case 'exploration':
+            return isLeading ? 'chat.activity.readFiles' : 'chat.activity.readFilesFollowing';
+        case 'web-search':
+            return isLeading ? 'chat.activity.searchedWeb' : 'chat.activity.searchedWebFollowing';
     }
-
-    return rows;
 };
+
+const areToolActivitySummaryPartsEqual = (
+    left: ToolActivitySummaryPart[],
+    right: ToolActivitySummaryPart[],
+): boolean => {
+    if (left === right) return true;
+    if (left.length !== right.length) return false;
+    return left.every((part, index) => {
+        const other = right[index];
+        return part.category === other?.category && part.count === other.count;
+    });
+};
+
+type ActivityGroupExpansion = {
+    expanded: boolean;
+    source: 'auto' | 'user';
+};
+
+const ToolActivityGroupRow: React.FC<ToolActivityGroupRowProps> = ({
+    activities,
+    summaryParts,
+    streamPhase,
+    isMobile,
+    expandedTools,
+    onToggleTool,
+    onShowPopup,
+    animateTailText,
+}) => {
+    const { t } = useI18n();
+    const hasRunningActivity = React.useMemo(() => activities.some(isActivityRunning), [activities]);
+    const hasStreamingReasoning = streamPhase !== 'completed'
+        && activities.some((activity) => activity.kind === 'reasoning');
+    // Live groups open automatically until the user chooses a state. Keep
+    // that choice authoritative while more activity updates arrive.
+    const autoExpanded = hasRunningActivity || hasStreamingReasoning;
+    const [expansion, setExpansion] = React.useState<ActivityGroupExpansion>(() => ({
+        expanded: autoExpanded,
+        source: 'auto',
+    }));
+    const isExpanded = expansion.source === 'auto'
+        ? autoExpanded && expansion.expanded
+        : expansion.expanded;
+    const summary = React.useMemo(() => summaryParts.map((part, index) => (
+        t(getToolActivitySummaryKey(part, index === 0))
+    )).join(', '), [summaryParts, t]);
+    const leadingToolName = activities.find((activity) => activity.kind === 'tool' && activity.part.type === 'tool');
+    const icon = leadingToolName?.kind === 'tool' && leadingToolName.part.type === 'tool'
+        ? getToolIcon(leadingToolName.part.tool)
+        : <Icon name="brain-ai-3" className="h-3.5 w-3.5" />;
+
+    const handleToggle = React.useCallback(() => {
+        setExpansion({ expanded: !isExpanded, source: 'user' });
+    }, [isExpanded]);
+
+    React.useLayoutEffect(() => {
+        setExpansion((previous) => {
+            if (previous.source === 'user') {
+                return previous;
+            }
+            if (previous.expanded === autoExpanded) {
+                return previous;
+            }
+            return { expanded: autoExpanded, source: 'auto' };
+        });
+    }, [autoExpanded]);
+
+    const renderActivity = (activity: TurnActivityPart): React.ReactNode => {
+        if (activity.kind === 'reasoning') {
+            return <InlineReasoningBlock activity={activity} streamPhase={streamPhase} />;
+        }
+        if (activity.kind === 'justification') {
+            return <InlineJustificationBlock activity={activity} />;
+        }
+        const toolName = activity.part.type === 'tool' ? activity.part.tool.toLowerCase() : '';
+        if (isStaticTool(toolName)) {
+            return (
+                <MemoStaticGroupedToolRow
+                    toolName={toolName}
+                    activities={[activity]}
+                    animateTailText={animateTailText}
+                />
+            );
+        }
+        return (
+            <MemoExpandableToolRow
+                activity={activity}
+                isExpanded={expandedTools.has(activity.id)}
+                isMobile={isMobile}
+                onToggleTool={onToggleTool}
+                onShowPopup={onShowPopup}
+                animateTailText={animateTailText}
+            />
+        );
+    };
+
+    return (
+        <div className="my-1">
+            <button
+                type="button"
+                aria-expanded={isExpanded}
+                onClick={handleToggle}
+                className="group/tool flex w-full min-w-0 items-center gap-x-1.5 rounded-xl px-0.5 py-1.5 text-left"
+            >
+                <Icon
+                    name={isExpanded ? 'arrow-down-s' : 'arrow-right-s'}
+                    className="h-3 w-3 flex-shrink-0"
+                    style={{ color: 'var(--tools-description)' }}
+                />
+                <span className="inline-flex h-5 flex-shrink-0 items-center" style={{ color: 'var(--tools-description)' }}>
+                    {icon}
+                </span>
+                <span className={cn(TOOL_ROW_TITLE_CLASS, 'min-w-0 truncate')} style={{ color: 'var(--tools-description)' }}>
+                    {summary}
+                </span>
+            </button>
+            {isExpanded ? (
+                <div className="relative ml-2 pl-3">
+                    <span
+                        aria-hidden="true"
+                        className="pointer-events-none absolute left-0 top-0 bottom-0 w-px"
+                        style={{ backgroundColor: 'var(--tools-border)' }}
+                    />
+                    {/* Child rows carry their own vertical padding. Do not add
+                        another gap between them in the expanded timeline. */}
+                    <div
+                        className={cn(
+                            'space-y-0',
+                            '[&_.oc-static-tool-row]:!py-0.5',
+                            '[&_[role="button"]]:!py-0.5',
+                        )}
+                    >
+                        {activities.map((activity) => (
+                            <React.Fragment key={activity.id}>{renderActivity(activity)}</React.Fragment>
+                        ))}
+                    </div>
+                </div>
+            ) : null}
+        </div>
+    );
+};
+
+const MemoToolActivityGroupRow = React.memo(ToolActivityGroupRow, (prev, next) => {
+    return prev.streamPhase === next.streamPhase
+        && prev.isMobile === next.isMobile
+        && prev.expandedTools === next.expandedTools
+        && prev.onToggleTool === next.onToggleTool
+        && prev.onShowPopup === next.onShowPopup
+        && prev.animateTailText === next.animateTailText
+        && areActivityListsEqual(prev.activities, next.activities)
+        && areToolActivitySummaryPartsEqual(prev.summaryParts, next.summaryParts);
+});
 
 /**
  * Render a static aggregated tool row.
@@ -679,14 +799,14 @@ const StaticToolRowInner: React.FC<{
                 'oc-static-tool-row flex w-full items-center gap-x-1.5 pr-2 pl-px py-1.5 rounded-xl min-w-0'
             )}
         >
-            <div className="inline-flex h-5 items-center flex-shrink-0" style={{ color: 'var(--tools-icon)' }}>
+            <div className="inline-flex h-5 items-center flex-shrink-0" style={{ color: 'var(--tools-description)' }}>
                 {icon}
             </div>
             <MinDurationShineText
                 active={hasRunningActivity}
                 minDurationMs={1000}
                 className={cn(TOOL_ROW_TITLE_CLASS, 'inline-flex items-center flex-shrink-0 opacity-85')}
-                style={{ color: 'var(--tools-title)' }}
+                style={{ color: 'var(--tools-description)' }}
                 title={displayName}
             >
                 {displayName}
@@ -896,6 +1016,21 @@ const ProgressiveGroup: React.FC<ProgressiveGroupProps> = ({
                     </>
                 );
 
+            case 'tool-activity-group':
+                return (
+                    <MemoToolActivityGroupRow
+                        key={`activity-${row.activities[0]?.id ?? index}`}
+                        activities={row.activities}
+                        summaryParts={row.summaryParts}
+                        streamPhase={streamPhase}
+                        isMobile={isMobile}
+                        expandedTools={expandedTools}
+                        onToggleTool={onToggleTool}
+                        onShowPopup={onShowPopup}
+                        animateTailText={row.activities.some((activity) => animatedToolIds?.has(activity.id))}
+                    />
+                );
+
             case 'tool-expandable':
                 return (
                     <MemoExpandableToolRow
@@ -956,13 +1091,13 @@ const ProgressiveGroup: React.FC<ProgressiveGroupProps> = ({
                     className="group/tool flex w-full flex-wrap items-center gap-x-2 gap-y-0.5 pr-2 pl-px py-1.5 rounded-xl text-left"
                     onClick={onToggle}
                 >
-                    <span className="inline-flex h-5 items-center flex-shrink-0" style={{ color: 'var(--tools-icon)' }}>
+                    <span className="inline-flex h-5 items-center flex-shrink-0" style={{ color: 'var(--tools-description)' }}>
                         <Icon name="stack" className="h-3.5 w-3.5" />
                     </span>
                     <span
                         className="leading-5 font-semibold inline-flex h-5 items-center flex-shrink-0"
                         style={{
-                            color: 'var(--tools-title)',
+                            color: 'var(--tools-description)',
                             fontSize: '0.9rem',
                             letterSpacing: '0.005em',
                         }}
