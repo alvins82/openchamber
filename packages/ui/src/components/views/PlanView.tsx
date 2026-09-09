@@ -521,11 +521,7 @@ export const PlanView: React.FC<PlanViewProps> = ({ targetPath = null, savedProj
 
     const readText = async (path: string): Promise<string> => {
       if (runtimeApis.files?.readFile) {
-        // Plan paths can outlive their files (for example after a plan is
-        // archived or moved). This helper is used for probes, so a missing
-        // candidate should be treated as an empty result rather than logged
-        // as an HTTP 404 by the runtime.
-        const result = await runtimeApis.files.readFile(path, { optional: true });
+        const result = await runtimeApis.files.readFile(path);
         return result?.content ?? '';
       }
 
