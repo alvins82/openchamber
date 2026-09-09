@@ -2123,7 +2123,6 @@ export const settingsDict = {
   'settings.view.actions.backToSettings': 'Powrót do ustawień',
   'settings.view.actions.closeSettings': 'Zamknij ustawienia',
   'settings.view.actions.closeSettingsWithShortcut': 'Zamknij ustawienia ({shortcut}+,)',
-  'settings.view.actions.openSectionList': 'Otwórz listę sekcji',
   'settings.view.actions.reloadOpenCode': 'Przeładuj OpenCode',
   'settings.view.actions.reloadOpenCodeTooltip': 'Uruchom ponownie OpenCode i przeładuj jego konfigurację.',
 
