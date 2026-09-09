@@ -3322,8 +3322,6 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                     <MobileDraftTargetTriggers
                         selectedProject={selectedDraftProject}
                         selectedBranchLabel={selectedDraftBranchLabel}
-                        hasUncommittedChanges={selectedDraftDirectoryHasUncommittedChanges}
-                            announceDirtyState={newSessionDraftAnnouncesDirtyState}
                         showBranchSelector={shouldShowDraftBranchSelector}
                         theme={currentTheme}
                         onOpenPicker={setMobileDraftPicker}
