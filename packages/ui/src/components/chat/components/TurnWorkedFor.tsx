@@ -11,6 +11,7 @@ interface TurnWorkedForProps {
     completedAt?: number;
     durationMs?: number;
     onToggle: () => void;
+    collapsible?: boolean;
 }
 
 const TurnWorkedFor: React.FC<TurnWorkedForProps> = ({
@@ -20,6 +21,7 @@ const TurnWorkedFor: React.FC<TurnWorkedForProps> = ({
     completedAt,
     durationMs,
     onToggle,
+    collapsible = true,
 }) => {
     const { t } = useI18n();
     const [now, setNow] = React.useState(() => Date.now());
@@ -69,7 +71,7 @@ const TurnWorkedFor: React.FC<TurnWorkedForProps> = ({
                 <div className={headerClassName} data-turn-worked-for="true">
                     {labelElement}
                 </div>
-            ) : (
+            ) : collapsible ? (
                 <button
                     type="button"
                     aria-expanded={isExpanded}
@@ -84,6 +86,10 @@ const TurnWorkedFor: React.FC<TurnWorkedForProps> = ({
                     />
                     {labelElement}
                 </button>
+            ) : (
+                <div className={headerClassName} data-turn-worked-for="true">
+                    {labelElement}
+                </div>
             )}
         </div>
     );
