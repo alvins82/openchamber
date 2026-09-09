@@ -26,6 +26,17 @@ Use this doc when you ask an agent to change tool/header/description behavior.
 - `MessageBody.tsx`
   - Places the same collapsed activity rows into the live rendering path while
     preserving text and unrelated tool positions.
+  - When `LiveTurnActivity` owns the live disclosure, keeps the final answer
+    outside the activity region while final-message Thinking and tools remain
+    inside it.
+
+- `LiveTurnActivity.tsx`
+  - Owns the settled live-mode Activity disclosure and its runtime-derived
+    summary. It is mounted by `MessageList.tsx` only for turns with visible
+    live activity.
+  - `LiveActivityCollapse.tsx` owns the retained DOM and disclosure lifecycle;
+    `liveActivitySummary.ts` parses authoritative completed tool metadata only
+    after the turn settles.
 
 - `progressiveGroupRows.ts`
   - Owns the pure activity classification and row aggregation rules.
@@ -61,7 +72,9 @@ Use this doc when you ask an agent to change tool/header/description behavior.
 - `TurnWorkedFor.tsx`
   - Renders the turn-level `Working for ...` and `Worked for ...` row. The
     completed row owns the higher-level collapse affordance for intermediate
-    assistant text, Thinking, and tool activity.
+    assistant text, Thinking, and tool activity in sorted mode. In live mode
+    it remains a read-only duration/status row while `LiveTurnActivity.tsx`
+    owns the activity disclosure, so the two controls do not compete.
 
 - `JustificationBlock.tsx`
   - Justification block wrapper over `ReasoningTimelineBlock`.
@@ -108,12 +121,14 @@ Use this doc when you ask an agent to change tool/header/description behavior.
   or expand choice remains authoritative while the run continues.
   `skill`, task, and unrelated tools remain boundaries or individual rows.
 - A turn with assistant output or visible activity has a runtime-derived
-  turn-level row. While the turn is running it says `Working for ...`, remains
-  expanded, and has no collapse affordance. Once authoritative completion
-  arrives it changes to `Worked for ...`, starts collapsed, and becomes
-  expandable. Collapsing the row hides intermediate assistant text together
-  with Thinking and tool activity while keeping the projected final assistant
-  text visible.
+  turn-level row. In sorted mode, while the turn is running it says `Working
+  for ...`, remains expanded, and has no collapse affordance. Once
+  authoritative completion arrives it changes to `Worked for ...`, starts
+  collapsed, and becomes expandable. Collapsing the row hides intermediate
+  assistant text together with Thinking and tool activity while keeping the
+  projected final assistant text visible. In live mode, the same duration row
+  stays visible as status context, while the settled `Activity` row folds the
+  completed work and leaves the final answer visible.
 - Every other tool, including search/fetch, OpenCode built-ins, custom tools, plugins, and MCP tools, is **expandable** and renders through `ToolPart`.
 - The managed `openchamber` plugin tool uses the expandable path and hides its broad protocol input. The plugin supplies the selected action's human description as the native tool title; the UI renders that metadata without owning an action map. The full versioned result envelope renders through the same neutral JSON summary/tree/raw views as other tools, without a tool-specific output card.
 - Selecting a JSON summary, tree, or raw view saves that mode in the persisted UI settings. New and refreshed JSON tool outputs read the saved mode across sessions; missing or invalid preferences use Summary.
