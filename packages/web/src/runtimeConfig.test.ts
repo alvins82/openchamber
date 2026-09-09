@@ -119,6 +119,27 @@ describe('waitForDesktopRuntimeBootstrap', () => {
     await expect(ready).resolves.toBeUndefined();
     expect(current.clearTimeout).toHaveBeenCalled();
   });
+
+  test('falls back when the main-process bootstrap event never arrives', async () => {
+    vi.useFakeTimers();
+    try {
+      const eventTarget = new EventTarget();
+      const current = makeWindow();
+      current.__OPENCHAMBER_ELECTRON__ = { runtime: 'electron' };
+      current.addEventListener = eventTarget.addEventListener.bind(eventTarget);
+      current.removeEventListener = eventTarget.removeEventListener.bind(eventTarget);
+      current.setTimeout = globalThis.setTimeout;
+      current.clearTimeout = globalThis.clearTimeout;
+      installWindow(current);
+
+      const ready = waitForDesktopRuntimeBootstrap();
+      await vi.runAllTimersAsync();
+
+      await expect(ready).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('createConfiguredWebAPIs', () => {
