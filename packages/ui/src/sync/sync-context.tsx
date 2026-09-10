@@ -2592,7 +2592,7 @@ export function SyncProvider(props: {
           publishDirectoryEventBatch(batch)
         }
       },
-      onReconnect: () => {
+      onReconnect: ({ replayReset }) => {
         // Queue recovery is independent of the directory-bootstrap debounce.
         void useMessageQueueStore.getState().resync().catch(() => undefined)
         useConfigStore.setState({
@@ -2602,10 +2602,10 @@ export function SyncProvider(props: {
         })
         const isFirstConnect = !pipelineHasConnectedRef.current
         pipelineHasConnectedRef.current = true
-        if (isFirstConnect && !pipelineDisconnectedBeforeFirstConnectRef.current) {
+        if (!replayReset && isFirstConnect && !pipelineDisconnectedBeforeFirstConnectRef.current) {
           return
         }
-        if (isRecentBoot()) {
+        if (!replayReset && isRecentBoot()) {
           return
         }
         resyncAfterStreamGap("stream-reconnect")

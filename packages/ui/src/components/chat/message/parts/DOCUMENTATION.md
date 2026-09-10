@@ -81,6 +81,25 @@ Use this doc when you ask an agent to change tool/header/description behavior.
 
 ## Current important behavior
 
+### Completed-turn file pills
+
+The completed-turn file pills under the final answer (the "show changed files"
+setting) use the same tool-result file identities, in first-touch order, with
+paths relative to the message's project root. The user message's
+`summary.diffs` is a working-tree snapshot between turn start and end, so it
+also lists edits made by other sessions or by hand in the same directory; it
+never decides which files belong to the turn on its own. It supplies a touched
+file's line counts, because those match the turn diff a pill opens; a file the
+snapshot does not list falls back to its tool patch and renders as a plain
+chip, since the turn diff has nothing to open for it. A file with no
+recoverable counts, or a snapshot entry without line changes, shows its name
+alone. One exception: edits delegated to `task` subagents live in child
+sessions the projection cannot see, so when a turn ran subagents the snapshot
+entries no own tool call touched are appended after the turn's own files. The
+list is projected once the last assistant message finished with `stop`, so no
+tool patch is parsed while the turn streams.
+
+### Message parts
 - Assistant markdown treats raw HTML as inert visible text. The final generated
   HTML is sanitized as defense in depth, with script and style elements
   forbidden, so message content cannot inject active DOM or application-wide
