@@ -48,7 +48,6 @@ export const waitForDesktopRuntimeBootstrap = async (): Promise<void> => {
 
   await new Promise<void>((resolve) => {
     let settled = false;
-    let timeoutId: number | undefined;
     const finish = () => {
       if (settled) return;
       settled = true;
@@ -58,7 +57,7 @@ export const waitForDesktopRuntimeBootstrap = async (): Promise<void> => {
     };
 
     currentWindow.addEventListener(DESKTOP_RUNTIME_BOOTSTRAP_READY_EVENT, finish, { once: true });
-    timeoutId = currentWindow.setTimeout(finish, DESKTOP_RUNTIME_BOOTSTRAP_TIMEOUT_MS);
+    const timeoutId = currentWindow.setTimeout(finish, DESKTOP_RUNTIME_BOOTSTRAP_TIMEOUT_MS);
   });
 };
 
