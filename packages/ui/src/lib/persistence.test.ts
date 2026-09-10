@@ -17,6 +17,7 @@ import {
   getRuntimeSettingsMirrorStorageKey,
   getSettingsSaveState,
   invalidateSettingsCache,
+  loadDesktopSettings,
   subscribeToSettingsSaveState,
   syncDesktopSettings,
   updateDesktopSettings,
@@ -1186,6 +1187,36 @@ describe('updateDesktopSettings', () => {
 
     await updateDesktopSettings({ fontSize: 16 });
     expect(saveCalls).toEqual([{ fontSize: 16 }]);
+  });
+
+  test('reconciles warm cached reads with pending and in-flight settings writes', async () => {
+    const saveResult = deferred<SettingsPayload>();
+    const savedSettings = { defaultModel: 'provider/new-model' } satisfies SettingsPayload;
+    const saveCalls: Array<Partial<SettingsPayload>> = [];
+    registerSettingsApi(
+      async (changes) => {
+        saveCalls.push(changes);
+        return saveResult.promise;
+      },
+      async () => ({
+        settings: { defaultModel: 'provider/old-model' },
+        source: 'web',
+      }),
+    );
+
+    const initialSettings = await loadDesktopSettings();
+    expect(initialSettings?.defaultModel).toBe('provider/old-model');
+    const update = updateDesktopSettings({ defaultModel: 'provider/new-model' });
+
+    const pendingSettings = await loadDesktopSettings();
+    expect(pendingSettings?.defaultModel).toBe('provider/new-model');
+    await delay(250);
+    expect(saveCalls).toEqual([{ defaultModel: 'provider/new-model' }]);
+    const inFlightSettings = await loadDesktopSettings();
+    expect(inFlightSettings?.defaultModel).toBe('provider/new-model');
+
+    saveResult.resolve(savedSettings);
+    await update;
   });
 
   test('toggling back to the server value inside the debounce window cancels the pending write', async () => {
