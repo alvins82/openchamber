@@ -83,8 +83,8 @@ export const formatTelemetryDuration = (ms: number): string => {
     return `${(ms / 1000).toFixed(1)}s`;
   }
   const minutes = Math.floor(ms / 60_000);
-  const seconds = Math.floor((ms % 60_000) / 1000);
-  return `${minutes}m${seconds}s`;
+  const seconds = Math.round((ms % 60_000) / 1000);
+  return `${minutes}m ${seconds}s`;
 };
 
 export const formatTelemetryTokens = (tokens: number): string => {
