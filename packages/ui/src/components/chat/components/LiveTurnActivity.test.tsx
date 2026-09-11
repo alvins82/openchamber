@@ -164,6 +164,19 @@ describe('live Activity with the real message body', () => {
         expect(header?.getAttribute('aria-expanded')).toBe('true');
     });
 
+    test('does not replay compaction summaries as live assistant output', async () => {
+        const progress = assistant('progress', [text('progress-text', 'Prior visible step')], 'tool-calls');
+        const compaction = assistant('compaction', [text('compaction-text', 'PRIVATE COMPACTION SUMMARY')], 'stop');
+        Object.assign(compaction.info, { summary: true });
+        const active = assistant('active', [text('active-text', 'Current live output')]);
+
+        await act(async () => root.render(<Harness record={turn([progress, compaction, active])} />));
+
+        expect(container.textContent).toContain('Prior visible step');
+        expect(container.textContent).toContain('Current live output');
+        expect(container.textContent).not.toContain('PRIVATE COMPACTION SUMMARY');
+    });
+
     test('keeps thinking in the final message inside Activity, not outside with the answer', async () => {
         const thinking: Part = { type: 'reasoning', id: 'thinking', messageID: 'final', sessionID: 'session', text: 'Private reasoning content', time: { start: 1, end: 2 } };
         const final = assistant('final', [thinking, text('final-text', 'Public answer')], 'stop');
