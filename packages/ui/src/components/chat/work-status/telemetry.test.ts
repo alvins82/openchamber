@@ -45,9 +45,23 @@ describe('turn telemetry', () => {
       tokens: { input: 1500, output: 100, reasoning: 0, cache: { read: 0, write: 0 } },
     }), parts: [text(21500)] });
     const stats = getLatestCompletedTurnStats(records);
-    expect(stats).toEqual({ stepsCount: 2, lastAssistantMessageId: 'a2', totalToolDurationMs: 3000,
+    expect(stats).toEqual({ stepsCount: 2, lastAssistantMessageId: 'a2', elapsedDurationMs: 24000, totalToolDurationMs: 3000,
       totalLlmDurationMs: 10000, outputTokens: 300, reasoningTokens: 300, totalGeneratedTokens: 600,
       inputTokens: 2500, cost: 0.015, tokensPerSecond: 60, responseTokensPerSecond: null, avgTtftMs: 1000, cacheHitPercent: 44 });
+  });
+
+  test('omits elapsed time when turn boundary timestamps are invalid', () => {
+    const invalidStartStats = getLatestCompletedTurnStats([
+      { info: { ...user, time: { created: Number.NaN } }, parts: [] },
+      { info: assistant(), parts: [] },
+    ]);
+    const invalidEndStats = getLatestCompletedTurnStats([
+      { info: { ...user, time: { created: 6000 } }, parts: [] },
+      { info: assistant(), parts: [] },
+    ]);
+
+    expect(invalidStartStats?.elapsedDurationMs).toBeNull();
+    expect(invalidEndStats?.elapsedDurationMs).toBeNull();
   });
 
   test('uses only the latest user-bounded turn', () => {

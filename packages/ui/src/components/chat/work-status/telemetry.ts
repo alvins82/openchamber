@@ -21,6 +21,7 @@ type CompletedStepStats = {
 export type CompletedTurnStats = {
   lastAssistantMessageId: string;
   stepsCount: number;
+  elapsedDurationMs: number | null;
   totalLlmDurationMs: number | null;
   totalToolDurationMs: number | null;
   avgTtftMs: number | null;
@@ -227,6 +228,13 @@ export function getLatestCompletedTurnStats(
 
   if (turnStartIdx === -1) return null;
 
+  const turnStartMs = nonnegative(records[turnStartIdx - 1].info.time.created);
+  const turnEndMs = nonnegative(records[lastCompletedAssistantIdx].info.time.completed);
+  const elapsedDurationMs =
+    turnStartMs !== null && turnEndMs !== null && turnEndMs >= turnStartMs
+      ? turnEndMs - turnStartMs
+      : null;
+
   const stepStatsList: CompletedStepStats[] = [];
   for (let i = turnStartIdx; i <= lastCompletedAssistantIdx; i += 1) {
     const record = records[i];
@@ -276,6 +284,7 @@ export function getLatestCompletedTurnStats(
   return {
     lastAssistantMessageId: records[lastCompletedAssistantIdx].info.id,
     stepsCount: stepStatsList.length,
+    elapsedDurationMs,
     totalLlmDurationMs,
     totalToolDurationMs,
     avgTtftMs,
