@@ -3270,7 +3270,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.workStatus.attention.bisect': 'Bisect en curso',
   'chat.workStatus.subagent.done': 'Listo',
   'chat.workStatus.subagent.failed': 'Falló',
-  'chat.workStatus.subagent.failedSummary': '{count} fallidos',
+  'chat.workStatus.subagent.failedSummary': 'Fallos: {count}',
   'chat.workStatus.subagent.untitled': 'Subagente',
   'chat.workStatus.mcp.toggle': 'Alternar {name}',
   'chat.workStatus.mcp.needsAuth': 'Iniciar sesión',
