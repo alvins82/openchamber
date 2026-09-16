@@ -1,6 +1,7 @@
 import { settingsDict } from './fr.settings';
 import { linearIssuePickerI18n } from './linear-issue-picker.i18n';
 import { linearPanelI18n } from './linear-panel.i18n';
+import { pluginPanelI18n } from './plugin-panel.i18n';
 
 export const dict = {
   'sessions.aiRename.action': 'Renommer avec l’IA',
@@ -29,6 +30,7 @@ export const dict = {
   ...settingsDict,
   ...linearIssuePickerI18n.fr,
   ...linearPanelI18n.fr,
+  ...pluginPanelI18n.fr,
   'terminalView.actions.attachSelection': 'Joindre la sortie sélectionnée',
   'terminalView.actions.copySelection': 'Copier la sortie sélectionnée',
   'terminalView.toast.selectionCopied': 'Sortie copiée',
@@ -2015,6 +2017,8 @@ export const dict = {
   'chat.container.sessionLoadError.retry': 'Réessayer',
   'sessions.sidebar.group.empty.loadingSessions': 'Chargement des sessions…',
   'sessions.sidebar.group.empty.loadFailed': 'Impossible d’actualiser les sessions.',
+  'sessions.sidebar.group.empty.initializationFailed': 'Impossible d’initialiser l’espace de travail.',
+  'sessions.search.submitHint': 'Appuyez sur Entrée pour rechercher',
   'sessions.sidebar.group.empty.retry': 'Réessayer',
   'sessions.sidebar.group.empty.permissionDenied': 'L’accès au dossier est requis.',
   'sessions.sidebar.group.empty.grantAccess': 'Autoriser l’accès',
@@ -2184,6 +2188,7 @@ export const dict = {
   'chat.toolOutputDialog.noOutputProduced': 'Aucune sortie n\'a été produite',
   'chat.toolPart.lspErrors': 'Erreurs LSP',
   'chat.toolPart.moreErrors': '+{count} plus d\'erreurs',
+  'chat.toolPart.moreRows': '+{count} lignes de plus',
   'chat.toolPart.error': 'Erreur:',
   'chat.toolPart.awaitingResponse': 'En attente de réponse...',
   'chat.toolPart.noOutputProduced': 'Aucune sortie produite',

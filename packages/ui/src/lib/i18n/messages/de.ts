@@ -1,6 +1,7 @@
 import { settingsDict } from './de.settings';
 import { linearIssuePickerI18n } from './linear-issue-picker.i18n';
 import { linearPanelI18n } from './linear-panel.i18n';
+import { pluginPanelI18n } from './plugin-panel.i18n';
 
 export const dict = {
   'sessions.aiRename.action': 'Mit KI umbenennen',
@@ -29,6 +30,7 @@ export const dict = {
   ...settingsDict,
   ...linearIssuePickerI18n.de,
   ...linearPanelI18n.de,
+  ...pluginPanelI18n.de,
   'common.language.german': 'Deutsch',
   'common.loading': 'Wird geladen...',
   'common.unavailable': 'Nicht verfügbar',
@@ -2253,6 +2255,7 @@ export const dict = {
   'chat.toolOutputDialog.noOutputProduced': 'Keine Ausgabe erzeugt',
   'chat.toolPart.lspErrors': 'LSP-Fehler',
   'chat.toolPart.moreErrors': '+{count} weitere Fehler',
+  'chat.toolPart.moreRows': '+{count} weitere Zeilen',
   'chat.toolPart.error': 'Fehler:',
   'chat.toolPart.awaitingResponse': 'Warte auf Antwort...',
   'chat.toolPart.noOutputProduced': 'Keine Ausgabe erzeugt',
@@ -3252,6 +3255,8 @@ export const dict = {
   'chat.container.sessionLoadError.retry': 'Erneut versuchen',
   'sessions.sidebar.group.empty.loadingSessions': 'Sitzungen werden geladen...',
   'sessions.sidebar.group.empty.loadFailed': 'Sitzungen konnten nicht geladen werden',
+  'sessions.sidebar.group.empty.initializationFailed': 'Arbeitsbereich konnte nicht initialisiert werden.',
+  'sessions.search.submitHint': 'Zum Suchen die Eingabetaste drücken',
   'sessions.sidebar.group.empty.retry': 'Erneut versuchen',
   'sessions.sidebar.group.empty.permissionDenied': 'Ordnerzugriff ist erforderlich.',
   'sessions.sidebar.group.empty.grantAccess': 'Zugriff gewähren',

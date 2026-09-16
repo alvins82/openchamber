@@ -2,6 +2,7 @@ import type { I18nKey } from './en';
 import { settingsDict } from './ko.settings';
 import { linearIssuePickerI18n } from './linear-issue-picker.i18n';
 import { linearPanelI18n } from './linear-panel.i18n';
+import { pluginPanelI18n } from './plugin-panel.i18n';
 
 export const dict: Record<I18nKey, string> = {
   'sessions.aiRename.action': 'AI로 이름 변경',
@@ -30,6 +31,7 @@ export const dict: Record<I18nKey, string> = {
   ...settingsDict,
   ...linearIssuePickerI18n.ko,
   ...linearPanelI18n.ko,
+  ...pluginPanelI18n.ko,
   'terminalView.actions.attachSelection': '선택한 출력 첨부',
   'terminalView.actions.copySelection': '선택한 출력 복사',
   'terminalView.toast.selectionCopied': '출력을 복사했습니다',
@@ -2291,6 +2293,8 @@ export const dict: Record<I18nKey, string> = {
   'chat.container.sessionLoadError.retry': '다시 시도',
   'sessions.sidebar.group.empty.loadingSessions': '세션을 불러오는 중…',
   'sessions.sidebar.group.empty.loadFailed': '세션을 새로 고칠 수 없습니다.',
+  'sessions.sidebar.group.empty.initializationFailed': '작업 공간을 초기화할 수 없습니다.',
+  'sessions.search.submitHint': 'Enter 키를 눌러 검색하세요',
   'sessions.sidebar.group.empty.retry': '다시 시도',
   'sessions.sidebar.group.empty.permissionDenied': '폴더 접근이 필요합니다.',
   'sessions.sidebar.group.empty.grantAccess': '접근 허용',
@@ -2477,6 +2481,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.toolOutputDialog.noOutputProduced': '출력 없음',
   'chat.toolPart.lspErrors': 'LSP 오류',
   'chat.toolPart.moreErrors': '+오류 {count}개 더 보기',
+  'chat.toolPart.moreRows': '+행 {count}개 더 보기',
   'chat.toolPart.error': '오류:',
   'chat.toolPart.awaitingResponse': '응답 대기 중…',
   'chat.toolPart.noOutputProduced': '출력 없음',
