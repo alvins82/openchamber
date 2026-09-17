@@ -26,11 +26,13 @@ The following functions are exported and used by the web server:
 ### Status and Diff Operations
 - `getStatus(directory)`: Get comprehensive Git status including current branch, tracking, ahead/behind, file changes, diff stats, merge/rebase state.
 - `getDiff(directory, { path, staged, contextLines })`: Get diff output for files or entire working tree with full Git blob identities. Untracked symbolic links are represented as link entries without following their targets.
+- `getPathDiff(directory, { path, staged, contextLines })`: `getDiff` for one path, returning `{ diff, submodule }`. `submodule` is `null` for ordinary paths. For a gitlink it is `{ headCommit, indexCommit, worktreeCommit, hasTrackedChanges, hasUntrackedFiles, hasConflict }`, because a submodule that only gained untracked files shows as modified in status while its patch is empty. `worktreeCommit` is `null` when the submodule is not checked out. An unmerged gitlink has no single index commit, so it reports `hasConflict: true` with `indexCommit: null`. Exposed as `GET /api/git/diff`.
+- Paths come from an earlier status listing and can stop resolving. Per-path operations reject with `error.code`: `path_not_found` when the path is absent from the working tree, index, and HEAD (for example, a file removed after the listing), and `nested_repository` when the path is a directory holding its own `.git` that is not a submodule (status lists it as `dir/`). `GET /api/git/diff` and `GET /api/git/file-diff` answer these with 404 and 422 and a `{ error, code }` body instead of 500. Entry existence is read from `ls-files --stage` and `ls-tree` modes, not `cat-file -e`: a gitlink's commit is not in the parent's object store, and simple-git reports that silent exit 1 as success.
 - `getRangeDiff(directory, { base, head, path, contextLines, includeWorkingTree })`: Compare the merge base of the exact selected refs with `head`. With `includeWorkingTree: true`, compare with the checked-out branch's current files instead, including committed, staged, unstaged, and untracked work in one net diff. This mode rejects a head that is not the checked-out branch. Exposed as `GET /api/git/range-diff`; omit `path` for the whole comparison.
 - `getRangeFiles(directory, { base, head, includeWorkingTree })`: List changed paths using the same comparison as `getRangeDiff`. A successful empty list means the final files match the merge base, even if staging and working-tree changes cancel each other out.
 - Both range operations honor refs literally. A local `main` is never replaced with `origin/main`, and an unavailable ref fails rather than choosing a different remote. The UI picker sends qualified refs to distinguish local and remote branches with matching display names.
 - Working-tree comparisons use the real index read-only. When untracked paths exist, a temporary copy of the index receives intent-to-add entries so Git computes additions, deletions, recreations, and renames together. Current contents come from the working tree, symlinks remain links, ignored files stay excluded, and temporary files are removed on success or failure.
-- `getFileDiff(directory, { path, staged })`: Get original and modified file contents for a single file (handles images as data URLs and symbolic links as their link-target text).
+- `getFileDiff(directory, { path, staged })`: Get original and modified file contents for a single file (handles images as data URLs and symbolic links as their link-target text). For a submodule, both sides are Git's `Subproject commit <sha>` text (HEAD against the worktree checkout, or against the index when `staged`) and the result carries the same `submodule` state as `getPathDiff`; other paths return no `submodule`, which the route sends as `null`.
 - `listUntrackedPaths(directory)`: List individual untracked file paths honoring ignore rules. Much cheaper than `getStatus` when that is all a caller needs. Deliberately not `--directory`: collapsed directory entries end in a slash and are rejected by the per-file diff helpers, so a caller would silently lose every file inside a new directory.
 - `getUntrackedDiffs(directory, filePaths, { concurrency, contextLines })`: Diffs for untracked files against an empty tree. Resolves the repository context once instead of per file (`getDiff` re-resolves every call, costing an extra `rev-parse` each time) and bounds how many diff processes run at once. Returns one entry per input path in order; unreadable paths yield `''` rather than failing the batch.
 - `collectDiffs(directory, files)`: Collect diff output for multiple files.
@@ -50,11 +52,20 @@ The following functions are exported and used by the web server:
 - `getRemotes(directory)`: Get list of configured remotes.
 
 ### Worktree Operations
-- `getWorktrees(directory)`: List all git worktrees for a repository.
+- `getWorktrees(directory)`: List all git worktrees for a repository. A directory outside any repository (or one that does not exist) is an authoritative empty list; any other git failure throws so callers keep their last known topology instead of clearing it. `GET /api/git/worktrees` answers such a failure with 500.
+- `observeWorktreeTopology(directory)`: Compare the repository's registered linked-worktree set with the last one seen for it and notify `subscribeWorktreeTopologyChanges` listeners when it changed. The set is fingerprinted from the `worktrees` directory under the common Git directory (mtime plus entry names), so the check is a stat and a readdir; the common directory is resolved with `git rev-parse --git-common-dir` once per requested directory and cached. The first observation only records a baseline. Never throws.
+- `subscribeWorktreeTopologyChanges(listener)`: Listener receives `{ directories, at }`, where `directories` are every directory of that repository the server has observed, so clients can map them onto registered projects. Returns an unsubscribe function.
 - `validateWorktreeCreate(directory, input)`: Validate worktree creation parameters (mode, branchName, startRef, upstream config).
 - `createWorktree(directory, input)`: Create a new worktree (supports 'new' and 'existing' modes, upstream setup). When the current tracked branch has no unpublished commits, the UI supplies its remote-tracking ref and this operation fetches that branch once before creating the worktree. A failed fetch falls back to the local branch and reports `sourceFetchFailed`; other remote start refs still require an existing local ref when their fetch fails. After populating the worktree, the repository's `post-checkout` hook runs once with git's standard arguments (null ref as previous HEAD, the checked-out HEAD, and flag `1`) from the worktree directory, mirroring `git worktree add` without `--no-checkout`; a missing or non-executable hook is skipped and a failing hook is logged as a warning, never failing worktree creation or the session bootstrap.
 - `removeWorktree(directory, input)`: Remove a worktree (optionally delete local branch).
 - `isLinkedWorktree(directory)`: Check if directory is a linked worktree (not primary).
+
+### Worktree topology change tracking
+There is no filesystem watcher and no polling. The server notices worktree changes in two ways, and both scale with what users are doing rather than with the number of registered projects:
+- Its own `createWorktree` and `removeWorktree` publish a change right after `git worktree add` / `git worktree remove` succeed (creation notifies before background population and setup scripts run).
+- `GET /api/git/status` for a repository and `GET /api/git/worktrees` with a non-empty listing call `observeWorktreeTopology` beside the response. Clients request status while they work in a repository, and a completed agent tool call already triggers a status refresh, so a worktree added by an agent or from a terminal is noticed on the next such request; nothing runs while the app is idle.
+
+`feature-routes-runtime.js` forwards each change to connected control-event clients as `openchamber:worktree-changed` with `{ directories, at }`. A repository nobody sends status or listing requests for is not observed until the next ordinary listing. `git worktree move` rewrites files inside an entry without touching the `worktrees` directory and is not detected. Tracking state is bounded: 500 directory-to-repository entries, 200 repositories, 100 directories per repository, least recently used dropped first.
 
 ### Worktree creation from a GitHub pull request
 The UI provisions `pr-<owner>` via `ensureRemoteName`/`ensureRemoteUrl`
@@ -71,6 +82,17 @@ bootstrap, tracking is left unset rather than writing `branch.*.remote` /
 - `fetch(directory, options)`: Fetch changes from remote.
 - `removeRemote(directory, options)`: Remove a configured remote (except `origin`).
 - `deleteRemoteBranch(directory, options)`: Delete a remote branch.
+
+`push` leaves an unspecified destination to Git, including `branch.<name>.pushRemote`
+and `remote.pushDefault`. Its missing-upstream fallback uses that same destination;
+an explicit remote overrides configuration. `pushed` contains only refs changed by
+the operation, derived from Git's porcelain flags, including first publication,
+fast-forward and forced updates. Each entry's `remote` is the destination remote
+name, not a ref. A successful no-op returns an empty array; rejected pushes throw.
+Commit & Push and Sync share the same fetch/pull/push flow in web, Electron and
+mobile, and never infer publication from an upstream `ahead` count. Fetch follows
+the selected upstream while push routing remains independent. VS Code does not
+mount these Git panels and keeps its separate extension-host Git implementation.
 
 ### Log Operations
 - `getLog(directory, options)`: Get commit history with stats (supports maxCount, from, to, file filters).
