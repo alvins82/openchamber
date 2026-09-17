@@ -3,12 +3,13 @@ import {
   clearSessionFailure,
   getSessionFailureKey,
   recordSessionFailure,
+  resetSessionFailureStore,
   useSessionFailureStore,
 } from './session-failure-store';
 
 describe('session failure store', () => {
   beforeEach(() => {
-    useSessionFailureStore.setState({ failures: new Map() });
+    resetSessionFailureStore();
   });
 
   test('keeps a terminal failure scoped to its directory and clears it for a new attempt', () => {
@@ -25,5 +26,24 @@ describe('session failure store', () => {
 
     clearSessionFailure('/repo', 'ses_child');
     expect(useSessionFailureStore.getState().failures.has(getSessionFailureKey('/repo', 'ses_child'))).toBe(false);
+  });
+
+  test('clears failures from every directory when the runtime changes', () => {
+    recordSessionFailure({
+      directory: '/repo',
+      sessionId: 'ses_child',
+      name: 'ProviderError',
+      message: 'provider unavailable',
+    });
+    recordSessionFailure({
+      directory: '/other-repo',
+      sessionId: 'ses_other',
+      name: 'ProviderError',
+      message: 'other provider unavailable',
+    });
+
+    resetSessionFailureStore();
+
+    expect(useSessionFailureStore.getState().failures.size).toBe(0);
   });
 });

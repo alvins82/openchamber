@@ -42,6 +42,11 @@ export function clearSessionFailure(directory: string | null | undefined, sessio
   useSessionFailureStore.setState({ failures });
 }
 
+export function resetSessionFailureStore(): void {
+  if (useSessionFailureStore.getState().failures.size === 0) return;
+  useSessionFailureStore.setState({ failures: new Map() });
+}
+
 export function useSessionFailures(): ReadonlyMap<string, SessionFailure> {
   return useSessionFailureStore((state) => state.failures);
 }
