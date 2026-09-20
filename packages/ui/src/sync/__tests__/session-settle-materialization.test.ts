@@ -11,11 +11,14 @@ import {
 } from "../session-message-loader"
 import { useNotificationStore } from "../notification-store"
 
+const mockSdkClient = {}
+
 mock.module("@/lib/opencode/client", () => ({
   opencodeClient: {
     listPendingQuestions: mock(async () => []),
     listPendingPermissions: mock(async () => []),
     getDirectory: () => "/repo",
+    getSdkClient: () => mockSdkClient,
     getScopedSdkClient: () => ({}),
     setDirectory: () => undefined,
   },
@@ -84,25 +87,35 @@ function createTextPartFixture(id: string, messageID: string, sessionID: string,
 
 function createFailedStepEvent(sessionID: string, messageID: string, name: string, message: string): Event {
   // SAFETY: session.next.step.failed event fixture for tests
-  return {
+  const event: Extract<Event, { type: "session.next.step.failed" }> = {
+    id: `event-${sessionID}-${messageID}`,
     type: "session.next.step.failed",
     properties: {
+      timestamp: 1,
       sessionID,
       assistantMessageID: messageID,
-      error: { name, message },
+      error: { type: "unknown", message },
     },
-  } as Event
+  }
+  // The live provider payload uses a broader error shape than the generated
+  // SDK union; keep that shape in this integration fixture.
+  Object.assign(event.properties, { error: { name, message } })
+  return event
 }
 
 function createSessionErrorEvent(sessionID: string, name: string, message: string): Event {
   // SAFETY: session.error event fixture for tests
-  return {
+  const event: Extract<Event, { type: "session.error" }> = {
+    id: `event-${sessionID}`,
     type: "session.error",
     properties: {
       sessionID,
-      error: { name, message },
     },
-  } as Event
+  }
+  // The live provider payload uses a broader error shape than the generated
+  // SDK union; keep that shape in this integration fixture.
+  Object.assign(event.properties, { error: { name, message } })
+  return event
 }
 
 function createSessionIdleEvent(sessionID: string): Event {
