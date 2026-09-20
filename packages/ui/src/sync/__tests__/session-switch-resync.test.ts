@@ -409,9 +409,15 @@ describe("resyncBlockingRequestsForDirectory", () => {
     } as Event
 
     try {
+      handleEvent("/repo", failureEvent, childStores, routingIndex, `${runtimeKey}:stale`)
+      expect(useSessionFailureStore.getState().failures.has(getSessionFailureKey("/repo", "ses_a"))).toBe(false)
+
       handleEvent("/repo", failureEvent, childStores, routingIndex, runtimeKey)
       handleEvent("/repo", idleEvent, childStores, routingIndex, runtimeKey)
 
+      expect(useSessionFailureStore.getState().failures.has(getSessionFailureKey("/repo", "ses_a"))).toBe(true)
+
+      handleEvent("/repo", busyEvent, childStores, routingIndex, `${runtimeKey}:stale`)
       expect(useSessionFailureStore.getState().failures.has(getSessionFailureKey("/repo", "ses_a"))).toBe(true)
 
       handleEvent("/repo", busyEvent, childStores, routingIndex, runtimeKey)

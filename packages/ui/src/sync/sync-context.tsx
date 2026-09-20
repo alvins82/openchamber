@@ -1810,7 +1810,11 @@ export function handleEvent(
     const errorSummary = payload.type === "session.error" ? summarizeOpenCodeError(props.error) : null
     if (errorSummary && sessionID) {
       recordSessionError({ sessionId: sessionID, directory: resolvedDirectory ?? null, ...errorSummary })
-      recordSessionFailure({ sessionId: sessionID, directory: resolvedDirectory ?? null, ...errorSummary })
+      // Pipeline cleanup flushes queued events after a runtime reset. An old
+      // pipeline must not repopulate the new runtime's live failure state.
+      if (expectedRuntimeKey === getRuntimeKey()) {
+        recordSessionFailure({ sessionId: sessionID, directory: resolvedDirectory ?? null, ...errorSummary })
+      }
     }
     // Skip subtask sessions — only top-level sessions generate notifications
     const storeState = getDirectoryEventState(store, batch)
@@ -1834,14 +1838,14 @@ export function handleEvent(
     // SAFETY: session.status payloads are normalized by the event pipeline and
     // always carry the SDK session ID plus a status discriminator.
     const props = payload.properties as { sessionID?: string; status?: { type?: string } }
-    if (props.sessionID && props.status?.type === "busy") {
+    if (props.sessionID && props.status?.type === "busy" && expectedRuntimeKey === getRuntimeKey()) {
       clearSessionFailure(resolvedDirectory ?? null, props.sessionID)
     }
   }
 
   if (payload.type === "session.deleted") {
     const sessionID = getSessionIdFromPayload(payload)
-    if (sessionID) clearSessionFailure(resolvedDirectory ?? null, sessionID)
+    if (sessionID && expectedRuntimeKey === getRuntimeKey()) clearSessionFailure(resolvedDirectory ?? null, sessionID)
   }
 
   // Sync-layer parent resync: when a child session goes idle, recover
