@@ -399,8 +399,13 @@ function enqueueSessionMaterialization(
   const k = getSessionMaterializationRequestKey(runtimeKey, directory, sessionID)
   const existing = pendingSessionMaterializations.get(k)
   if (existing && Date.now() - existing.enqueuedAt < SESSION_MATERIALIZATION_COOLDOWN_MS) {
-    const settlementMustFollowEarlierRecovery = request.reason === "settled-running-tool"
-      && existing.request.reason !== "settled-running-tool"
+    const isSettlement = request.reason === "settled-running-tool"
+      || request.reason === "settled-error"
+      || request.reason === "settled-unanswered-turn"
+    const existingIsSettlement = existing.request.reason === "settled-running-tool"
+      || existing.request.reason === "settled-error"
+      || existing.request.reason === "settled-unanswered-turn"
+    const settlementMustFollowEarlierRecovery = isSettlement && !existingIsSettlement
     if (!settlementMustFollowEarlierRecovery) return
   }
 
@@ -925,6 +930,9 @@ const getSessionIdFromPayload = (event: Event): string | null => {
   if (
     event.type === "message.removed"
     || event.type === "session.status"
+    || event.type === "session.idle"
+    || event.type === "session.error"
+    || event.type === "session.next.step.failed"
     || event.type === "todo.updated"
     || event.type === "permission.asked"
     || event.type === "permission.replied"
@@ -990,6 +998,11 @@ const getMessageIdFromPayload = (event: Event): string | null => {
     }
     const id = (info as { id?: unknown }).id
     return typeof id === "string" && id.length > 0 ? id : null
+  }
+
+  if (event.type === "session.next.step.failed") {
+    const messageID = props.assistantMessageID ?? props.messageID
+    return typeof messageID === "string" && messageID.length > 0 ? messageID : null
   }
 
   if (event.type === "message.removed" || event.type === "message.part.delta" || event.type === "message.part.removed") {
@@ -1676,11 +1689,12 @@ const recordTurnOutcomeNotification = (
   childStores: ChildStoreManager,
   batch?: DirectoryEventBatch,
 ): void => {
-  // SAFETY: session.idle and session.error properties carry the addressed session ID and the optional OpenCode error payload.
+  // SAFETY: turn-settling event properties carry the addressed session ID and the optional OpenCode error payload.
   const props = payload.properties as { sessionID?: string; error?: OpenCodeSessionErrorPayload }
-  const sessionID = props.sessionID
+  const sessionID = props.sessionID ?? getSessionIdFromPayload(payload)
   if (!sessionID) return
-  const errorSummary = payload.type === "session.error" ? summarizeOpenCodeError(props.error) : null
+  const isError = payload.type === "session.error" || payload.type === "session.next.step.failed"
+  const errorSummary = isError ? summarizeOpenCodeError(props.error) : null
   if (errorSummary) {
     recordSessionError({ sessionId: sessionID, directory, ...errorSummary })
   }
@@ -1759,7 +1773,11 @@ export function handleEvent(
   // Turn-complete and error notifications are recorded before the directory
   // store lookup. Unopened directories are never bootstrapped and have no
   // store, yet their collapsed sidebar rows still need the unread dot.
-  if ((payload.type === "session.idle" || payload.type === "session.error") && directory && directory !== "global") {
+  if (
+    (payload.type === "session.idle" || payload.type === "session.error" || payload.type === "session.next.step.failed")
+    && directory
+    && directory !== "global"
+  ) {
     recordTurnOutcomeNotification(payload, directory, childStores, batch)
   }
 
@@ -2088,7 +2106,11 @@ export function handleEvent(
     }
   }
 
-  if (payload.type === "session.idle" || payload.type === "session.error") {
+  if (
+    payload.type === "session.idle"
+    || payload.type === "session.error"
+    || payload.type === "session.next.step.failed"
+  ) {
     const sessionID = getSessionIdFromPayload(payload) ?? undefined
     const state = getDirectoryEventState(store, batch)
     const messageID = sessionID ? getStaleRunningToolMessageID(state, sessionID) : undefined
@@ -2097,6 +2119,18 @@ export function handleEvent(
         reason: "settled-running-tool",
         messageID,
       })
+    } else if (sessionID && (payload.type === "session.error" || payload.type === "session.next.step.failed")) {
+      enqueueSessionMaterialization(resolvedDirectory, sessionID, childStores, {
+        reason: "settled-error",
+      })
+    } else if (sessionID && payload.type === "session.idle") {
+      const messages = state.message[sessionID] ?? []
+      const lastMessage = messages.length > 0 ? messages[messages.length - 1] : undefined
+      if (lastMessage?.role === "user") {
+        enqueueSessionMaterialization(resolvedDirectory, sessionID, childStores, {
+          reason: "settled-unanswered-turn",
+        })
+      }
     }
     // The reducer already wrote the idle/error status into `draft`; finalize
     // the interrupted message and orphaned tools through the same batch.
