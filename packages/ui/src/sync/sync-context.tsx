@@ -65,6 +65,7 @@ import { cleanupPersistedSessionState } from "./session-deletion-cleanup"
 import { toast } from "@/components/ui"
 import { appendNotification } from "./notification-store"
 import { recordSessionError, summarizeOpenCodeError, type OpenCodeSessionErrorPayload } from "./session-error-log"
+import { clearSessionFailure, recordSessionFailure } from "./session-failure-store"
 import {
   applyGlobalSessionStatusEvent,
   applyGlobalSessionStatusEvents,
@@ -1687,6 +1688,7 @@ const recordTurnOutcomeNotification = (
   payload: Event,
   directory: string,
   childStores: ChildStoreManager,
+  expectedRuntimeKey: string,
   batch?: DirectoryEventBatch,
 ): void => {
   // SAFETY: turn-settling event properties carry the addressed session ID and the optional OpenCode error payload.
@@ -1697,6 +1699,11 @@ const recordTurnOutcomeNotification = (
   const errorSummary = isError ? summarizeOpenCodeError(props.error) : null
   if (errorSummary) {
     recordSessionError({ sessionId: sessionID, directory, ...errorSummary })
+    // Pipeline cleanup flushes queued events after a runtime reset. An old
+    // pipeline must not repopulate the new runtime's live failure state.
+    if (expectedRuntimeKey === getRuntimeKey()) {
+      recordSessionFailure({ sessionId: sessionID, directory, ...errorSummary })
+    }
   }
   if (isSubtaskSession(sessionID, directory, childStores, batch)) return
   appendNotification({
@@ -1778,7 +1785,21 @@ export function handleEvent(
     && directory
     && directory !== "global"
   ) {
-    recordTurnOutcomeNotification(payload, directory, childStores, batch)
+    recordTurnOutcomeNotification(payload, directory, childStores, expectedRuntimeKey, batch)
+  }
+
+  if (payload.type === "session.status") {
+    // SAFETY: session.status payloads are normalized by the event pipeline and
+    // always carry the SDK session ID plus a status discriminator.
+    const props = payload.properties as { sessionID?: string; status?: { type?: string } }
+    if (props.sessionID && props.status?.type === "busy" && expectedRuntimeKey === getRuntimeKey()) {
+      clearSessionFailure(directory, props.sessionID)
+    }
+  }
+
+  if (payload.type === "session.deleted") {
+    const sessionID = getSessionIdFromPayload(payload)
+    if (sessionID && expectedRuntimeKey === getRuntimeKey()) clearSessionFailure(directory, sessionID)
   }
 
   // Global events
