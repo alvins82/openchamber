@@ -96,19 +96,23 @@ Use this doc when you ask an agent to change tool/header/description behavior.
 
 ## Current important behavior
 
-### Optional live history disclosure
+### Live activity disclosure
 
-Activity Default is shared by the settings UI in both render modes. In live
-mode, Expanded preserves the original timeline without a turn disclosure.
-Collapsed adds one Activity header after completion or interruption while preserving the visible live rows,
-their order, and their individual controls. It adds no tool subgroups, side
-line, height cap, or inner scroller. Sorted rendering keeps its existing path
-and its own per-turn expansion state.
+Activity Default applies in both render modes. In live mode, Expanded keeps
+activity inline without a turn disclosure. For turns with visible activity,
+Collapsed mode shows a read-only `Working for ...` row while the turn runs.
+Once the turn reaches a final answer or interruption, the row changes to
+`Worked for ...` and an Activity disclosure appears. The disclosure keeps
+message order. `ProgressiveGroup` combines adjacent eligible tool and Thinking
+activity into rows; failed tools stay individual and expandable. The disclosure
+has no inner scroller or fixed-height cap. Sorted mode keeps its own per-turn
+activity and `Worked for ...` expansion.
 
-The active turn stays open without an Activity header. A final assistant message with `finish: stop`
-collapses the earlier messages and the final message's non-text parts, keeping
-the answer and its existing footer outside. Intermediate-text summary fallback
-and compaction summaries never become final answers. Messages with
+The active turn stays open without an Activity header. A final assistant
+message with `finish: stop` collapses earlier messages and the final message's
+non-text parts, keeping the answer and its existing footer outside.
+Intermediate-text summary fallback and compaction summaries never become
+final answers. Messages with
 `info.summary === true` are internal context snapshots: live Activity excludes
 them from its disclosure rows and header summary, while the ordinary assistant
 block omits them in sorted mode and in live turns without an Activity disclosure.
