@@ -334,6 +334,7 @@ function reconcileSessionMove(
 
   const sourceContainsSession = sourceState.session.some((candidate) => candidate.id === session.id)
   const status = moveRecordEntries(sourceState.session_status, destinationState.session_status, [session.id])
+  const compactions = moveRecordEntries(sourceState.session_compaction, destinationState.session_compaction, [session.id])
   const diffs = moveRecordEntries(sourceState.session_diff, destinationState.session_diff, [session.id])
   const todos = moveRecordEntries(sourceState.todo, destinationState.todo, [session.id])
   const permissions = moveRecordEntries(sourceState.permission, destinationState.permission, [session.id])
@@ -346,6 +347,7 @@ function reconcileSessionMove(
     session: sourceState.session.filter((candidate) => candidate.id !== session.id),
     sessionTotal: sourceContainsSession ? Math.max(0, sourceState.sessionTotal - 1) : sourceState.sessionTotal,
     session_status: status.source,
+    session_compaction: compactions.source,
     session_diff: diffs.source,
     todo: todos.source,
     permission: permissions.source,
@@ -360,6 +362,7 @@ function reconcileSessionMove(
       ? destinationState.sessionTotal + 1
       : destinationState.sessionTotal,
     session_status: status.destination,
+    session_compaction: compactions.destination,
     session_diff: diffs.destination,
     todo: todos.destination,
     permission: permissions.destination,

@@ -304,6 +304,11 @@ export function createEventPipeline(input: EventPipelineInput): EventPipeline {
       const props = payload.properties as { messageID: string; partID: string; field: string }
       return `message.part.delta:${props.messageID}:${props.partID}:${props.field}`
     }
+    if (payload.type === "session.next.compaction.delta") {
+      const props = payload.properties
+      if (!props.sessionID) return undefined
+      return `session.next.compaction.delta:${props.sessionID}:${props.messageID ?? ""}`
+    }
     return undefined
   }
 
@@ -475,6 +480,12 @@ export function createEventPipeline(input: EventPipelineInput): EventPipeline {
     const normalizedPayload = normalizeEventType(payload)
     const routedDirectory = routeDirectory?.(directory, normalizedPayload) || directory
     const d = getOrCreateDir(routedDirectory)
+    const clearCompactionDeltaKeys = (sessionID: string) => {
+      const prefix = `session.next.compaction.delta:${sessionID}:`
+      for (const coalesceKey of d.coalesced.keys()) {
+        if (coalesceKey.startsWith(prefix)) d.coalesced.delete(coalesceKey)
+      }
+    }
 
     // A full part snapshot is a coalescing barrier for that part's deltas:
     // drop its pending delta coalescing keys so a delta arriving after the
@@ -512,9 +523,21 @@ export function createEventPipeline(input: EventPipelineInput): EventPipeline {
           : undefined
       if (sessionID) {
         d.coalesced.delete(`session.status:${sessionID}`)
+        clearCompactionDeltaKeys(sessionID)
         if (normalizedPayload.type === "session.created" || normalizedPayload.type === "session.deleted") {
           d.coalesced.delete(`session.updated:${sessionID}`)
         }
+      }
+    }
+
+    if (
+      normalizedPayload.type === "session.next.compaction.started"
+      || normalizedPayload.type === "session.next.compaction.ended"
+      || normalizedPayload.type === "session.compacted"
+    ) {
+      const properties = normalizedPayload.properties
+      if (properties.sessionID) {
+        clearCompactionDeltaKeys(properties.sessionID)
       }
     }
 

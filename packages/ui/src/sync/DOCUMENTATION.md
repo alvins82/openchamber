@@ -568,6 +568,14 @@ Zustand skips re-renders when a selector returns the same reference (`Object.is`
 
 During streaming, `message.part.delta` fires ~60 times/sec. Eagerly cloning all fields caused every subscriber in the entire app to re-render 60/sec — a 10x overhead. Targeted cloning reduced MessageList renders from ~1972 to ~296 per session.
 
+Compaction is a live session subphase, not a replacement for OpenCode's
+`session_status` (`busy`/`retry`/`idle`). `session.next.compaction.started`
+adds a directory-scoped `session_compaction` entry so the chat status row can
+say that context is being compacted. The delta carries internal summary text;
+the pipeline coalesces it and the reducer intentionally does not retain or
+render it. `session.next.compaction.ended` and legacy `session.compacted` clear
+the entry, as do idle/error events and authoritative idle snapshots.
+
 ## Event → field mapping
 
 Queue recovery is independent of the directory-bootstrap debounce. The sync
@@ -580,9 +588,13 @@ Keep this in sync with `handleDirectoryEvent` in `sync-context.tsx`:
 
 | Event type | Fields to clone |
 |---|---|
-| `session.created/updated/deleted` | `session`, `permission`, `todo`, `part`; archived/deleted sessions also clone `question` |
+| `session.created/updated/deleted` | `session`, `permission`, `todo`, `part`; archived/deleted sessions also clone `question`, `session_compaction` |
 | `session.diff` | `session_diff` |
-| `session.status` | `session_status` |
+| `session.status` | `session_status`; idle also clears `session_compaction` |
+| `session.idle/error` | `session_status`, `session_compaction` (clear) |
+| `session.next.compaction.started` | `session_compaction` |
+| `session.next.compaction.delta` | (none — coalesced and intentionally not retained) |
+| `session.next.compaction.ended` / `session.compacted` | `session_compaction` |
 | `todo.updated` | `todo` |
 | `message.updated` | `message` |
 | `message.removed` | `message`, `part` |

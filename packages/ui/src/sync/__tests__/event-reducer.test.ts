@@ -279,6 +279,43 @@ describe("applyDirectoryEvent", () => {
     expect(draft.session_status.ses_1).toBe(statusRef)
   })
 
+  test("tracks compaction starts and clears both native and legacy completion events", () => {
+    const draft = state()
+    const started = {
+      type: "session.next.compaction.started",
+      properties: { sessionID: "ses_1" },
+    } as Event
+
+    expect(applyDirectoryEvent(draft, started)).toBe(true)
+    const startedState = draft.session_compaction.ses_1
+    expect(startedState?.startedAt).toBeGreaterThan(0)
+
+    expect(applyDirectoryEvent(draft, {
+      type: "session.next.compaction.delta",
+      properties: { sessionID: "ses_1", messageID: "msg_1", text: "internal summary" },
+    } as Event)).toBe(false)
+    expect(draft.session_compaction.ses_1).toBe(startedState)
+
+    expect(applyDirectoryEvent(draft, {
+      type: "session.compacted",
+      properties: { sessionID: "ses_1" },
+    } as Event)).toBe(true)
+    expect(draft.session_compaction.ses_1).toBeUndefined()
+  })
+
+  test("clears compaction when an idle event is repeated after completion", () => {
+    const draft = state({
+      session_status: { ses_1: { type: "idle" } as SessionStatus },
+      session_compaction: { ses_1: { startedAt: 123 } },
+    })
+
+    expect(applyDirectoryEvent(draft, {
+      type: "session.idle",
+      properties: { sessionID: "ses_1" },
+    } as Event)).toBe(true)
+    expect(draft.session_compaction.ses_1).toBeUndefined()
+  })
+
   test("detects retry status metadata changes", () => {
     const draft = state({
       session_status: {

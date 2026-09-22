@@ -101,6 +101,7 @@ export class SessionCacheRetention {
         // Token/part deltas do not affect retention eligibility.
         if (state.message === previous.message
           && state.session_status === previous.session_status
+          && state.session_compaction === previous.session_compaction
           && state.permission === previous.permission
           && state.question === previous.question) return
         this.schedule(directory)

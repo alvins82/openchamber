@@ -10,7 +10,7 @@ import type {
   Todo,
 } from "@opencode-ai/sdk/v2/client"
 import { Binary } from "./binary"
-import type { FileDiff, GlobalState, State } from "./types"
+import type { FileDiff, GlobalState, SessionCompactionState, State } from "./types"
 import { dropSessionCaches } from "./session-cache"
 import { stripSessionDiffSnapshots } from "./sanitize"
 import { syncDebug } from "./debug"
@@ -143,6 +143,65 @@ function areMessageUpdateFieldsEqual(existing: Message, next: Message): boolean 
     }
   }
 
+  return true
+}
+
+type CompactionEventSnapshot = {
+  sessionID?: string
+  messageID?: string
+  reason?: SessionCompactionState["reason"]
+  timestamp?: number
+}
+
+function readCompactionEventProperties(event: Event): CompactionEventSnapshot {
+  if (event.type === "session.next.compaction.started" || event.type === "session.next.compaction.ended") {
+    // SAFETY: the event discriminator is authoritative here; sidecar payloads
+    // use the same event shape but may omit the optional metadata fields.
+    const properties = event.properties
+    return {
+      sessionID: properties.sessionID,
+      messageID: properties.messageID,
+      reason: properties.reason,
+      timestamp: properties.timestamp,
+    }
+  }
+
+  if (event.type === "session.compacted") {
+    return { sessionID: event.properties.sessionID }
+  }
+
+  return {}
+}
+
+function clearSessionCompaction(draft: State, sessionID: string): boolean {
+  if (!Object.prototype.hasOwnProperty.call(draft.session_compaction, sessionID)) return false
+  delete draft.session_compaction[sessionID]
+  return true
+}
+
+function applySessionCompactionStarted(draft: State, event: Event): boolean {
+  const props = readCompactionEventProperties(event)
+  if (!props.sessionID) return false
+
+  const previous = draft.session_compaction[props.sessionID]
+  const next: SessionCompactionState = {
+    startedAt: props.timestamp ?? previous?.startedAt ?? Date.now(),
+  }
+  const messageID = props.messageID ?? previous?.messageID
+  const reason = props.reason ?? previous?.reason
+  if (messageID) next.messageID = messageID
+  if (reason) next.reason = reason
+
+  if (
+    previous
+    && previous.startedAt === next.startedAt
+    && previous.messageID === next.messageID
+    && previous.reason === next.reason
+  ) {
+    return false
+  }
+
+  draft.session_compaction[props.sessionID] = next
   return true
 }
 
@@ -314,6 +373,21 @@ export function applyDirectoryEvent(
       return true
     }
 
+    case "session.next.compaction.started":
+      return applySessionCompactionStarted(draft, event)
+
+    case "session.next.compaction.delta":
+      // The delta is the internal compaction summary. OpenCode hides it from
+      // live chat output, so keep it out of state and avoid high-frequency
+      // store publications while still routing the event by session.
+      return false
+
+    case "session.next.compaction.ended":
+    case "session.compacted": {
+      const props = readCompactionEventProperties(event)
+      return props.sessionID ? clearSessionCompaction(draft, props.sessionID) : false
+    }
+
     case "todo.updated": {
       const props = event.properties as { sessionID: string; todos: Todo[] }
       if (areJsonEquivalent(draft.todo[props.sessionID], props.todos)) {
@@ -326,8 +400,11 @@ export function applyDirectoryEvent(
 
     case "session.status": {
       const props = event.properties as { sessionID: string; status: SessionStatus }
+      const clearedCompaction = props.status.type === "idle"
+        ? clearSessionCompaction(draft, props.sessionID)
+        : false
       if (areSessionStatusesEqual(draft.session_status[props.sessionID], props.status)) {
-        return false
+        return clearedCompaction
       }
       draft.session_status[props.sessionID] = props.status
       return true
@@ -336,8 +413,9 @@ export function applyDirectoryEvent(
     case "session.idle": {
       const props = event.properties as { sessionID: string }
       const status = { type: "idle" } as const
+      const clearedCompaction = clearSessionCompaction(draft, props.sessionID)
       if (areSessionStatusesEqual(draft.session_status[props.sessionID], status)) {
-        return false
+        return clearedCompaction
       }
       draft.session_status[props.sessionID] = status
       return true
@@ -346,8 +424,9 @@ export function applyDirectoryEvent(
     case "session.error": {
       const props = event.properties as { sessionID: string }
       const status = { type: "idle" } as const
+      const clearedCompaction = clearSessionCompaction(draft, props.sessionID)
       if (areSessionStatusesEqual(draft.session_status[props.sessionID], status)) {
-        return false
+        return clearedCompaction
       }
       draft.session_status[props.sessionID] = status
       return true

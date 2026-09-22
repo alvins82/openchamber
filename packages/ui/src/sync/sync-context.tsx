@@ -725,8 +725,11 @@ export function applySessionStatusSnapshot(
   let changed = false
   store.setState((state: DirectoryStore) => {
     const current = state.session_status ?? {}
+    const currentCompactions = state.session_compaction ?? {}
     let next: Record<string, SessionStatus> | undefined
+    let nextCompactions: typeof currentCompactions | undefined
     const draft = () => (next ??= { ...current })
+    const compactionDraft = () => (nextCompactions ??= { ...currentCompactions })
 
     for (const sessionId of candidateSessionIds) {
       const incoming = toSessionStatus(snapshot[sessionId])
@@ -752,9 +755,17 @@ export function applySessionStatusSnapshot(
         draft()[sessionId] = { type: "idle" }
         changed = true
       }
+      if (currentCompactions[sessionId]) {
+        delete compactionDraft()[sessionId]
+        changed = true
+      }
     }
 
-    return next ? { session_status: next } : state
+    if (!next && !nextCompactions) return state
+    return {
+      ...(next ? { session_status: next } : {}),
+      ...(nextCompactions ? { session_compaction: nextCompactions } : {}),
+    }
   })
 
   return changed
@@ -934,6 +945,10 @@ const getSessionIdFromPayload = (event: Event): string | null => {
     || event.type === "session.idle"
     || event.type === "session.error"
     || event.type === "session.next.step.failed"
+    || event.type === "session.next.compaction.started"
+    || event.type === "session.next.compaction.delta"
+    || event.type === "session.next.compaction.ended"
+    || event.type === "session.compacted"
     || event.type === "todo.updated"
     || event.type === "permission.asked"
     || event.type === "permission.replied"
@@ -967,7 +982,10 @@ const getSessionIdFromPayload = (event: Event): string | null => {
     return typeof partSessionID === "string" && partSessionID.length > 0 ? partSessionID : null
   }
 
-  if (event.type === "message.part.delta" || event.type === "message.part.removed") {
+  if (
+    event.type === "message.part.delta"
+    || event.type === "message.part.removed"
+  ) {
     const sessionID = props.sessionID
     return typeof sessionID === "string" && sessionID.length > 0 ? sessionID : null
   }
@@ -1006,7 +1024,14 @@ const getMessageIdFromPayload = (event: Event): string | null => {
     return typeof messageID === "string" && messageID.length > 0 ? messageID : null
   }
 
-  if (event.type === "message.removed" || event.type === "message.part.delta" || event.type === "message.part.removed") {
+  if (
+    event.type === "message.removed"
+    || event.type === "message.part.delta"
+    || event.type === "message.part.removed"
+    || event.type === "session.next.compaction.started"
+    || event.type === "session.next.compaction.delta"
+    || event.type === "session.next.compaction.ended"
+  ) {
     const messageID = props.messageID
     return typeof messageID === "string" && messageID.length > 0 ? messageID : null
   }
@@ -1170,6 +1195,7 @@ const findSessionInChildStores = (
       state.session.some((s) => s.id === sessionID)
       || Object.prototype.hasOwnProperty.call(state.message, sessionID)
       || Object.prototype.hasOwnProperty.call(state.session_status ?? {}, sessionID)
+      || Object.prototype.hasOwnProperty.call(state.session_compaction ?? {}, sessionID)
     ) {
       // Self-heal: populate the routing index so future events resolve instantly
       setIndexedSessionDirectory(routingIndex, sessionID, dir)
@@ -1191,6 +1217,7 @@ const childStoreHasSessionState = (
   return state.session.some((session) => session.id === sessionID)
     || Object.prototype.hasOwnProperty.call(state.message, sessionID)
     || Object.prototype.hasOwnProperty.call(state.session_status ?? {}, sessionID)
+    || Object.prototype.hasOwnProperty.call(state.session_compaction ?? {}, sessionID)
 }
 
 const childStoreHasMessagePartState = (
@@ -1982,6 +2009,7 @@ export function handleEvent(
         || (payload.type === "session.updated" && Boolean((payload.properties as { info?: Session }).info?.time.archived))
       ) {
         cloneField("question", (value) => ({ ...value }))
+        cloneField("session_compaction", (value) => ({ ...value }))
       }
       cloneField("todo", (value) => ({ ...value }))
       cloneField("part", (value) => ({ ...value }))
@@ -1996,6 +2024,12 @@ export function handleEvent(
     case "session.error":
       recordDirectoryRecoveryEvent(store, payload)
       cloneField("session_status", (value) => ({ ...(value ?? {}) }))
+      cloneField("session_compaction", (value) => ({ ...(value ?? {}) }))
+      break
+    case "session.next.compaction.started":
+    case "session.next.compaction.ended":
+    case "session.compacted":
+      cloneField("session_compaction", (value) => ({ ...(value ?? {}) }))
       break
     case "todo.updated":
       cloneField("todo", (value) => ({ ...value }))
@@ -2510,6 +2544,10 @@ export function SyncProvider(props: {
               store.setState(patch)
               if (patch.session_status) {
                 applyGlobalSessionStatusSnapshot(directory, patch.session_status, getDirectoryOwnedSessionIds(directory, store.getState().session))
+                const compactionCandidates = Object.keys(store.getState().session_compaction)
+                if (compactionCandidates.length > 0) {
+                  applySessionStatusSnapshot(store, patch.session_status, compactionCandidates, "authoritative")
+                }
               }
               if (patch.session || patch.message) {
                 ingestDirectoryStateIntoRoutingIndex(routingIndex, directory, store.getState())
@@ -3146,6 +3184,14 @@ export function useSessionStatus(sessionID: string, directory?: string) {
     })
   }, [sessionID, store])
   return React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+}
+
+/** Get the live compaction phase for a specific session. */
+export function useSessionCompaction(sessionID: string, directory?: string) {
+  return useDirectorySync(
+    useCallback((state: State) => sessionID ? state.session_compaction[sessionID] : undefined, [sessionID]),
+    directory,
+  )
 }
 
 /** Get permissions for a specific session */

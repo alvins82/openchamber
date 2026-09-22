@@ -39,10 +39,11 @@ describe("getReconnectCandidateSessionIds", () => {
         createSession("incomplete"),
       ],
       session_status: { busy: busyStatus, child: busyStatus },
+      session_compaction: { compacting: { startedAt: 123 } },
       message: {
         incomplete: [createAssistantMessage("m-1", "incomplete")],
       },
-    }).sort()).toEqual(["busy", "child", "incomplete", "parent"])
+    }).sort()).toEqual(["busy", "child", "compacting", "incomplete", "parent"])
   })
 
   test("closed historical children do not trigger parent recovery or a history scan", () => {

@@ -7,9 +7,11 @@ import type {
   Todo,
 } from "@opencode-ai/sdk/v2/client"
 import type { FileDiff } from "./types"
+import type { SessionCompactionState } from "./types"
 
 type SessionCache = {
   session_status: Record<string, SessionStatus | undefined>
+  session_compaction?: Record<string, SessionCompactionState | undefined>
   session_diff: Record<string, FileDiff[] | undefined>
   todo: Record<string, Todo[] | undefined>
   message: Record<string, Message[] | undefined>
@@ -25,6 +27,10 @@ export function getProtectedSessionCacheIds(store: SessionCache): Set<string> {
     if (status && status.type !== "idle") {
       protectedIds.add(sessionID)
     }
+  }
+
+  for (const [sessionID, compaction] of Object.entries(store.session_compaction ?? {})) {
+    if (compaction) protectedIds.add(sessionID)
   }
 
   for (const [sessionID, permissions] of Object.entries(store.permission ?? {})) {
@@ -80,6 +86,7 @@ export function dropSessionCaches(store: SessionCache, sessionIDs: Iterable<stri
     delete store.todo[sessionID]
     delete store.session_diff[sessionID]
     delete store.session_status[sessionID]
+    if (store.session_compaction) delete store.session_compaction[sessionID]
     delete store.permission[sessionID]
     delete store.question[sessionID]
   }

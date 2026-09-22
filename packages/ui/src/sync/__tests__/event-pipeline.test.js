@@ -947,6 +947,29 @@ describe('createEventPipeline — per-directory isolation (P1)', () => {
 // ---------------------------------------------------------------------------
 
 describe('createEventPipeline — delta coalescing (Option C)', () => {
+  it('coalesces compaction summary deltas by session and message without retaining their text in sync state', async () => {
+    const received = await runPipelineWithEvents([
+      {
+        directory: 'dir-a',
+        payload: {
+          type: 'session.next.compaction.delta',
+          properties: { sessionID: 's1', messageID: 'm1', text: 'first' },
+        },
+      },
+      {
+        directory: 'dir-a',
+        payload: {
+          type: 'session.next.compaction.delta',
+          properties: { sessionID: 's1', messageID: 'm1', text: 'latest' },
+        },
+      },
+    ]);
+
+    expect(received).toHaveLength(1);
+    expect(received[0].payload.type).toBe('session.next.compaction.delta');
+    expect(received[0].payload.properties.text).toBe('latest');
+  });
+
   it('accumulates consecutive deltas for the same (messageID, partID, field) into one event', async () => {
     const events = ['Hello ', 'world', ', ', 'how ', 'are ', 'you?'].map((chunk) => ({
       directory: 'dir-a',

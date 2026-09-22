@@ -92,4 +92,18 @@ describe("events for directories without a store", () => {
 
     expect(open.getState().session_status.ses_new).toEqual({ type: "busy" })
   })
+
+  test("a directory-less compaction event follows the session's open store", () => {
+    const routingIndex = createEventRoutingIndex()
+    const open = childStores.getChild("/open")!
+    open.setState({ session: [session("ses_open", "/open")] })
+
+    handleEvent("global", {
+      id: "e1",
+      type: "session.next.compaction.started",
+      properties: { sessionID: "ses_open" },
+    } as Event, childStores, routingIndex, getRuntimeKey())
+
+    expect(open.getState().session_compaction.ses_open?.startedAt).toBeGreaterThan(0)
+  })
 })

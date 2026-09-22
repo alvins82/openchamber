@@ -518,6 +518,7 @@ describe("moveSessionToDirectory", () => {
       session: [{ id: "session-a", title: "Move me", directory: "/source" } as Session],
       sessionTotal: 1,
       session_status: { "session-a": { type: "idle" } },
+      session_compaction: { "session-a": { startedAt: 123 } },
       session_diff: { "session-a": [{ file: "changed.ts", additions: 1, deletions: 0 }] },
       todo: { "session-a": [{ id: "todo-a", content: "Check move", status: "pending", priority: "medium" }] as never },
       question: { "session-a": [{ id: "question-a" }] as never },
@@ -542,6 +543,7 @@ describe("moveSessionToDirectory", () => {
     expect(source.getState().session).toHaveLength(0)
     expect(source.getState().sessionTotal).toBe(0)
     expect(source.getState().session_status["session-a"]).toBe(undefined)
+    expect(source.getState().session_compaction["session-a"]).toBe(undefined)
     expect(source.getState().session_diff["session-a"]).toBe(undefined)
     expect(source.getState().todo["session-a"]).toBe(undefined)
     expect(source.getState().permission["session-a"]).toBe(undefined)
@@ -552,6 +554,7 @@ describe("moveSessionToDirectory", () => {
     expect(destination.getState().sessionTotal).toBe(1)
     expect((destination.getState().session[0] as SessionWithDirectory)?.directory).toBe("/destination")
     expect(destination.getState().session_status["session-a"]?.type).toBe("idle")
+    expect(destination.getState().session_compaction["session-a"]?.startedAt).toBe(123)
     expect(destination.getState().session_diff["session-a"]?.[0]?.file).toBe("changed.ts")
     expect(destination.getState().todo["session-a"]?.[0]?.content).toBe("Check move")
     expect(destination.getState().permission["session-a"]?.[0]?.id).toBe("permission-a")
@@ -571,6 +574,7 @@ describe("moveSessionToDirectory", () => {
     expect(destination.getState().session).toHaveLength(0)
     expect(destination.getState().message["session-a"]).toBe(undefined)
     expect(destination.getState().part["message-a"]).toBe(undefined)
+    expect(destination.getState().session_compaction["session-a"]).toBe(undefined)
   })
 })
 
