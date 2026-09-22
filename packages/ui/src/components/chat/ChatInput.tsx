@@ -56,7 +56,6 @@ import { ModelControls } from './ModelControls';
 import { focusChatInput } from './composer/editor/dom';
 import { parseAgentMentions } from '@/lib/messages/agentMentions';
 import { CONTEXT_METADATA_KEY, draftFromContextPayload } from '@/lib/messages/contextParts';
-import { ComposerStatusBar } from './ComposerStatusBar';
 import { shouldSubmitEnter } from './composer/keyboardPolicy';
 import { getDropdownNavigationKey } from '@/components/ui/dropdown-navigation';
 import { useChatColumnSession } from './chatColumnSession';
@@ -133,6 +132,7 @@ import {
     type ComposerChange,
     type ComposerEditorHandle,
 } from './composer/editor/ComposerEditor';
+import { useComposerHeightLimit } from './composer/editor/useComposerHeightLimit';
 import { createComposerEditorViewStore } from './composer/editor/viewStore';
 import { composerAutoCorrect } from './composer/editor/autocorrect';
 import {
@@ -164,9 +164,13 @@ import {
 import { useAutocompletePosition } from './composer/state/useAutocompletePosition';
 import { useMessageHistory } from './composer/state/useMessageHistory';
 import { useComposerDraft } from './composer/state/useComposerDraft';
+import { useDictationOrigin } from './composer/state/useDictationOrigin';
 import { useDraftTarget } from './composer/state/useDraftTarget';
 import { useMobileComposerShell } from './composer/state/useMobileComposerShell';
 import { useMobileViewportPin } from './composer/state/useMobileViewportPin';
+import { MobileCommentComposer } from './composer/comment/MobileCommentComposer';
+import { useMobileCommentComposerController } from './composer/comment/MobileCommentComposerContext';
+import { useMobileCommentComposerMode } from './composer/comment/useMobileCommentComposerMode';
 import {
     DraftTargetSelectors,
     MobileDraftTargetSheets,
@@ -179,6 +183,8 @@ import { ComposerContextChips } from './composer/ui/ComposerContextChips';
 import { LinkedReferenceRow } from './composer/ui/LinkedReferenceRow';
 import { RevertedMessageDock } from './composer/ui/RevertedMessageDock';
 import { SessionSuggestionChip } from '@/components/chat/SessionSuggestionChip';
+import { FormDock } from '@/components/chat/FormDock';
+import { PermissionDock } from '@/components/chat/PermissionDock';
 import { SessionGoalRow } from '@/components/chat/SessionGoalRow';
 import {
     createInputHistoryIdentity,
@@ -192,7 +198,7 @@ import {
     mapInputHistoryEntriesToValues,
     mergeSessionInputHistory,
 } from './inputHistory';
-import { useUserMessageHistory } from '@/sync/sync-context';
+import { useScopedBlockingForms, useScopedBlockingPermissions, useUserMessageHistory } from '@/sync/sync-context';
 
 // Lazy like in ChatMessage: a static import would pull the @pierre/diffs and
 // Shiki stacks into the eager startup graph for a dialog opened on demand.
@@ -215,7 +221,6 @@ const MAX_MOBILE_COMPOSER_LINES = 16;
  */
 const MOBILE_COMPOSER_BOUND_GAP_PX = 4;
 const EMPTY_QUEUE: QueuedMessage[] = [];
-const EMPTY_ATTACHMENTS: AttachedFile[] = [];
 const COMPACT_CHAT_PLACEHOLDER_MAX_WIDTH = 560;
 const renameFileForAttachmentCitation = (file: File, filename: string): File => {
     if (file.name === filename) {
@@ -332,7 +337,6 @@ const MemoComposerDictation = React.memo(ComposerDictation);
 const MemoMobileAgentButton = React.memo(MobileAgentButton);
 
 const MemoMobileModelButton = React.memo(MobileModelButton);
-const MemoComposerStatusBar = React.memo(ComposerStatusBar);
 
 interface ChatInputProps {
     onOpenSettings?: () => void;
@@ -391,7 +395,6 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     const [mobileControlsPanel, setMobileControlsPanel] = React.useState<MobileControlsPanel>(null);
     const [mobileAttachMenuOpen, setMobileAttachMenuOpen] = React.useState(false);
     const [mobileDraftPicker, setMobileDraftPicker] = React.useState<'project' | 'branch' | null>(null);
-    const [mobileDraftPickerQuery, setMobileDraftPickerQuery] = React.useState('');
     // Message history navigation state (up/down arrow to recall previous messages)
     const composerRef = React.useRef<ComposerEditorHandle>(null);
     // The mobile composer swaps between the collapsed pill and the full
@@ -455,6 +458,11 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     // instead of the main session. Collapsed keeps the fork alive (chip stays
     // visible) while the composer talks to the main session again.
     const btwPanel = useBtwPanelState(currentSessionId, currentSessionDirectoryForSync ?? currentDirectory ?? undefined);
+    const pendingForms = useScopedBlockingForms(currentSessionId, currentSessionDirectoryForSync ?? currentDirectory ?? undefined);
+    const pendingPermissions = useScopedBlockingPermissions(currentSessionId, currentSessionDirectoryForSync ?? currentDirectory ?? undefined);
+    const hasPendingPermission = pendingPermissions.length > 0;
+    // A pending permission or form owns the dock; the composer is not for sending then.
+    const hasPendingForm = pendingForms.length > 0 || hasPendingPermission;
     const btwSessionId = btwPanel.btwSessionId;
     const btwDirectory = btwPanel.btwDirectory;
     const btwComposerSessionId = btwPanel.pending && currentSessionId
@@ -489,7 +497,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     const prepareChatDraftDirectory = useSessionUIStore((s) => s.prepareChatDraftDirectory);
     const abortPromptSessionId = useSessionUIStore((s) => s.abortPromptSessionId);
     const clearAbortPrompt = useSessionUIStore((s) => s.clearAbortPrompt);
-    const attachedFiles = useInputStore((s) => isBtwActive ? EMPTY_ATTACHMENTS : s.attachedFiles);
+    const attachedFiles = useInputStore((s) => s.attachedFiles);
     const addAttachedFile = useInputStore((s) => s.addAttachedFile);
     const clearAttachedFiles = useInputStore((s) => s.clearAttachedFiles);
     const saveSessionAgentSelection = useSelectionStore((s) => s.saveSessionAgentSelection);
@@ -619,7 +627,6 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     });
 
     React.useEffect(() => {
-        if (isBtwActive) return;
         const modelKey = `${currentProviderId ?? ''}/${currentModelId ?? ''}`;
         const inputModalities = currentModelMetadata?.modalities?.input;
         const modalitySignature = inputModalities?.slice().sort().join(',') ?? null;
@@ -659,7 +666,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             modalities: unsupportedModalities.map((modality) => modalityLabels[modality]).join(', '),
             files: fileSummary,
         }), { id: `attachment-modalities:${modelKey}` });
-    }, [attachedFiles, currentModelId, currentModelMetadata, currentProviderId, isBtwActive, t]);
+    }, [attachedFiles, currentModelId, currentModelMetadata, currentProviderId, t]);
 
     const handleShowAttachmentPreview = React.useCallback((content: ToolPopupContent) => {
         if (!content.image) return;
@@ -1019,6 +1026,16 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     const consumeDrafts = useInlineCommentDraftStore((state) => state.consumeDrafts);
     const hasDrafts = draftCount > 0;
 
+    // Mobile comment mode (see composer/comment/): read imperatively here so
+    // the send/queue guards below see the live state; rendering and lifecycle
+    // live in useMobileCommentComposerMode further down.
+    const mobileCommentController = useMobileCommentComposerController();
+    const isMobileCommentOpen = React.useCallback(
+        () => isMobile && mobileCommentController?.getState().status === 'open',
+        [isMobile, mobileCommentController],
+    );
+    const attachMobileCommentRef = React.useRef<() => void>(() => undefined);
+
     const inputHistoryScope = useInputHistoryStore((state) => state.scope);
     const inputHistoryIdentity = React.useMemo(
         () => createInputHistoryIdentity(
@@ -1223,6 +1240,9 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
 
     // Add message to queue instead of sending
     const handleQueueMessage = React.useCallback(async () => {
+        // The comment's exit paths are attach/cancel; queueing a real prompt
+        // underneath comment mode must never fire.
+        if (isMobileCommentOpen()) return;
         const inputSnapshot = getCurrentInputSnapshot();
         if (!inputSnapshot.hasContent || !currentSessionId || !messageQueueTarget) return;
 
@@ -1353,7 +1373,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             return;
         }
         recordLinkedReferences(queueSessionId, queueTarget.directory, linked);
-        }, [getCurrentInputSnapshot, currentSessionId, messageQueueTarget, inputMode, hasDrafts, guestCommands, attachedFiles, sanitizeAttachmentsForSend, prepareDocumentMentions, extractInlineFileMentions, agents, currentDirectory, consumePendingSyntheticParts, inlineDraftTarget, consumeDrafts, linkedIssue, linkedPr, linkedLinearIssue, linkedGuestIssue, scrollToLatest, clearAttachedFiles, chatDraftIdentity, isMobile, addToQueue, currentProviderId, currentModelId, currentAgentName, currentVariant, t]);
+    }, [getCurrentInputSnapshot, currentSessionId, messageQueueTarget, inputMode, hasDrafts, guestCommands, attachedFiles, sanitizeAttachmentsForSend, prepareDocumentMentions, extractInlineFileMentions, agents, currentDirectory, consumePendingSyntheticParts, inlineDraftTarget, consumeDrafts, linkedIssue, linkedPr, linkedLinearIssue, linkedGuestIssue, scrollToLatest, clearAttachedFiles, chatDraftIdentity, isMobile, isMobileCommentOpen, addToQueue, currentProviderId, currentModelId, currentAgentName, currentVariant, t]);
 
     /** Put the context a queued message was captured with back on the composer chips. */
     const restoreQueuedContext = React.useCallback((context: readonly QueuedContextPart[]) => {
@@ -1460,6 +1480,9 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     };
 
     const handleSubmit = async (options?: SubmitOptions) => {
+        // Comment mode's only submit is attach; every other send path must be
+        // inert while it is open.
+        if (isMobileCommentOpen()) return;
         if (isBtwActive && currentSessionId && (btwPanel.creating || useBtwStore.getState().byParent[currentSessionId]?.pendingSend)) return;
         const submitRuntimeKey = getRuntimeKey();
         const queuedOnly = options?.queuedOnly ?? false;
@@ -1588,15 +1611,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             return;
         }
 
-        // Sending is authoritative: if a question prompt is open, dismiss it
-        // so the prompt cannot linger or strand the session. The dismiss clears
-        // the card instantly (optimistic) and formally rejects the question.
-        // Rejecting unblocks the agent's tool but does NOT end its turn, so a
-        // direct send would race with the still-active run and be silently
-        // discarded by the OpenCode runner. Instead we queue the message; the
-        // queued-message auto-send hook delivers it as the next turn once the
-        // rejected turn winds down and the session returns to idle. This avoids
-        // aborting the turn (which would surface an "aborted" notice).
+        // Auto-review owns the active workflow; follow-ups wait in its queue.
         if (currentSessionId && !queuedOnly && autoReviewRunning && !isBtwActive && !commandPlan) {
             void handleQueueMessage();
             return;
@@ -1607,19 +1622,18 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         // queues if the fork's own turn is busy).
         if (currentSessionId && !queuedOnly && !isBtwActive && !commandPlan) {
             // Sending is authoritative for blocking prompts: deny pending
-            // permissions and dismiss open questions for the session subtree,
-            // then queue the message once if either was open. The deny/clear
-            // vanishes the card instantly (optimistic); rejecting unblocks the
-            // agent's tool but does NOT end its turn, so a direct send would
-            // race with the still-active run and be silently discarded by the
-            // OpenCode runner. Instead we queue; the queued-message auto-send
-            // hook delivers it as the next turn once the rejected turn winds
-            // down and the session returns to idle (parity with #1740).
-            const [deniedPermissions, dismissedQuestions] = await Promise.all([
+            // permissions and dismiss open forms for the session subtree. The
+            // deny/clear vanishes the card instantly (optimistic); rejecting
+            // unblocks the agent's tool but does NOT end its turn.
+            const [deniedPermissions, dismissedForms] = await Promise.all([
                 sessionActions.dismissOpenPermissionsForSession(currentSessionId),
-                sessionActions.dismissOpenQuestionsForSession(currentSessionId),
+                sessionActions.dismissOpenFormsForSession(currentSessionId),
             ]);
-            if (deniedPermissions || dismissedQuestions) {
+            // An explicit Steer goes straight to the session inbox, which
+            // takes it while the turn is still active. Any other send would
+            // race with that run, so it is queued; the queued-message auto-send
+            // hook delivers it once the session returns to idle (#1740, #3369).
+            if ((deniedPermissions || dismissedForms) && delivery !== 'steer') {
                 void handleQueueMessage();
                 return;
             }
@@ -1650,7 +1664,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                 } else if (actionName === 'compact') {
                     await sessionActions.waitForConnectionOrThrow();
                     const compactDirectory = useSessionUIStore.getState().getDirectoryForSession(currentSessionId) || currentDirectory || undefined;
-                    await opencodeClient.summarizeSession(currentSessionId, providerIdToSend, modelIdToSend, compactDirectory);
+                    await opencodeClient.compactSession(currentSessionId, compactDirectory);
                 }
             } catch (error) {
                 restoreComposerText();
@@ -2083,6 +2097,8 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
 
     // Primary action for send/queue button — respects selected follow-up behavior
     const handlePrimaryAction = React.useCallback(() => {
+        // Comment mode owns the composer; its only primary action is attach.
+        if (isMobileCommentOpen()) return;
         const inputSnapshot = getCurrentInputSnapshot();
         const canQueue = !isBtwActive && inputMode === 'normal' && inputSnapshot.hasContent && currentSessionId && (currentSessionPhase !== 'idle' || autoReviewRunning);
         if (followUpBehavior === 'queue' && canQueue) {
@@ -2092,7 +2108,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         } else {
             void handleSubmitRef.current();
         }
-    }, [inputMode, getCurrentInputSnapshot, currentSessionId, currentSessionPhase, autoReviewRunning, followUpBehavior, handleQueueMessage, isBtwActive]);
+    }, [inputMode, getCurrentInputSnapshot, currentSessionId, currentSessionPhase, autoReviewRunning, followUpBehavior, handleQueueMessage, isBtwActive, isMobileCommentOpen]);
 
     // Draft welcome presets: submit immediately.
     const submitPresetPrompt = React.useCallback((text: string, type: 'command' | 'skill') => {
@@ -2106,10 +2122,22 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         void handleSubmitRef.current({ presetText });
     }, []);
 
+    const { markDictationStart, keepTranscriptForOrigin } = useDictationOrigin({
+        identityRef: currentChatDraftIdentityRef,
+        restoreDraft,
+        onKeptForOrigin: () => {
+            toast.info(t('chat.chatInput.toast.dictationKeptForOriginalSession'));
+        },
+    });
+
     // Dictation: insert the transcript inline; optionally submit immediately.
     // getCurrentInputSnapshot reads composerRef.current.getValue() first, so setting
     // it synchronously lets handleSubmit pick up the text in the same tick.
+    // A transcript belongs to the draft that was on screen when recording
+    // started. After a session switch it is kept for that draft and must not
+    // be inserted or sent here.
     const handleDictationInsert = React.useCallback((text: string) => {
+        if (keepTranscriptForOrigin(text)) return;
         setMessage((prev) => {
             // The editor is controlled by this state; getCurrentInputSnapshot
             // reads it back, so no imperative write is needed.
@@ -2118,15 +2146,16 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         setTimeout(() => {
             composerRef.current?.focus();
         }, 0);
-    }, []);
+    }, [keepTranscriptForOrigin]);
 
     const handleDictationInsertAndSend = React.useCallback((text: string) => {
+        if (keepTranscriptForOrigin(text)) return;
         // Same as preset chips: the composed text goes into the submit as an
         // explicit override instead of being staged in the textarea, which may
         // not be mounted (collapsed mobile pill).
         const next = appendInlineText(composerRef.current?.getValue() ?? messageRef.current, text);
         void handleSubmitRef.current({ presetText: next });
-    }, []);
+    }, [keepTranscriptForOrigin]);
 
     // A command with an argument sends once the isolated composer owns its draft.
     React.useEffect(() => {
@@ -2257,7 +2286,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             const recalled = messageHistory.older({ text: message, attachments: attachedFiles });
             if (recalled !== null) {
                 setMessage(recalled.text);
-                if (!isBtwActive) useInputStore.getState().setAttachedFiles([...recalled.attachments]);
+                useInputStore.getState().setAttachedFiles([...recalled.attachments]);
                 // Caret to the start, so the recalled message reads from its
                 // beginning rather than from wherever the draft's caret was.
                 requestAnimationFrame(() => composerRef.current?.setSelection(0, 0));
@@ -2270,14 +2299,14 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             const recalled = messageHistory.newer({ text: message, attachments: attachedFiles });
             if (recalled !== null) {
                 setMessage(recalled.text);
-                if (!isBtwActive) useInputStore.getState().setAttachedFiles([...recalled.attachments]);
+                useInputStore.getState().setAttachedFiles([...recalled.attachments]);
                 requestAnimationFrame(() => composerRef.current?.setSelection(recalled.text.length, recalled.text.length));
             }
             return;
         }
 
-        // Preserve each surface's existing default until the user changes the
-        // setting. Once configured, the choice applies consistently everywhere.
+        // Mobile and expanded desktop require Ctrl/Cmd+Enter to send from the
+        // keyboard. The standard desktop composer follows the setting.
         const isCtrlEnter = e.ctrlKey || e.metaKey;
         if (e.key === 'Enter' && shouldSubmitEnter({
             isMobile,
@@ -2345,14 +2374,23 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         }
     }, [agents, currentAgentName, currentSessionId, setAgent, saveSessionAgentSelection]);
 
-    // Height the dictation transcript needs (null when idle). Its overlay sits
+    // Height the failed-dictation salvage text needs. Its overlay sits
     // absolutely over the composer, so the composer must be able to grow for
-    // it. The editor sizes itself to its own content; this is the one external
-    // constraint, applied as a floor on the editor's container.
+    // it. Apply the editor's line and screen bounds before using that height as
+    // a floor, otherwise long salvage text can push the action row off-screen.
+    const dictationHeightHostRef = React.useRef<HTMLDivElement | null>(null);
     const [dictationContentHeight, setDictationContentHeight] = React.useState<number | null>(null);
     const handleDictationContentHeightChange = React.useCallback((height: number | null) => {
         setDictationContentHeight((prev) => (prev === height ? prev : height));
     }, []);
+    const dictationHeightLimit = useComposerHeightLimit({
+        active: dictationContentHeight !== null,
+        disabled: isComposerExpanded,
+        hostRef: dictationHeightHostRef,
+        maxLines: isMobile ? MAX_MOBILE_COMPOSER_LINES : MAX_VISIBLE_COMPOSER_LINES,
+        boundSelector: isMobile ? '[data-composer-bound]' : undefined,
+        boundGapPx: isMobile ? MOBILE_COMPOSER_BOUND_GAP_PX : 0,
+    });
 
     const updateAutocompleteState = React.useCallback((
         value: string,
@@ -2567,10 +2605,6 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     }, [addAttachedFile, insertTextAtSelection, t]);
 
     const handlePaste = React.useCallback(async (event: ClipboardEvent) => {
-        if (isBtwActive && event.clipboardData?.files.length) {
-            event.preventDefault();
-            return;
-        }
         const clipboardData = event.clipboardData;
         if (!clipboardData) return;
         // Narrowed alias so the rest of the handler reads as it did when this
@@ -2633,7 +2667,6 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             const behavior: LargeTextPasteBehavior = largeTextPasteBehavior;
             const shouldOfferLargePaste = sessionReady
                 && inputMode === 'normal'
-                && !isBtwActive
                 && behavior !== 'inline'
                 && isLargePlainTextPaste(pastedText);
 
@@ -2761,7 +2794,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
 
         e.preventDefault();
         await attachFilesWithCitation([...imageFiles, ...otherFiles], pastedText);
-    }, [addAttachedFile, attachFilesWithCitation, currentSessionId, inputMode, isBtwActive, largeTextPasteBehavior, markFileMentionPasteSuppression, message, newSessionDraftOpen, insertTextAtSelection, setMessage, t, updateAutocompleteState]);
+    }, [addAttachedFile, attachFilesWithCitation, currentSessionId, inputMode, largeTextPasteBehavior, markFileMentionPasteSuppression, message, newSessionDraftOpen, insertTextAtSelection, setMessage, t, updateAutocompleteState]);
 
     const handleFileSelect = (file: { name: string; path: string; relativePath?: string }) => {
 
@@ -3027,10 +3060,6 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     };
 
     const handleDrop = async (e: React.DragEvent) => {
-        if (isBtwActive) {
-            e.preventDefault();
-            return;
-        }
         dragEnterCountRef.current = 0;
         const draggedFiles = hasDraggedFiles(e.dataTransfer);
         if (!draggedFiles) {
@@ -3108,7 +3137,6 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     const fileInputRef = React.useRef<HTMLInputElement>(null);
 
     const attachFiles = React.useCallback(async (files: FileList | File[]) => {
-        if (isBtwActive) return;
         const attachmentDraftKey = useInputStore.getState().attachmentDraftKey;
         const list = Array.isArray(files) ? files : Array.from(files);
         let attached = false;
@@ -3124,10 +3152,9 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         if (list.length > 0 && !attached) {
             toast.error(t('chat.chatInput.toast.attachFileFailed'));
         }
-    }, [addAttachedFile, isBtwActive, t]);
+    }, [addAttachedFile, t]);
 
     const handleVSCodePickFiles = React.useCallback(async () => {
-        if (isBtwActive) return;
         try {
             const data = (await vscodeApi?.pickFiles?.({ extensions: ACCEPTED_ATTACHMENT_EXTENSIONS })) as {
                 files?: Array<{ name: string; mimeType?: string; dataUrl?: string }>;
@@ -3171,27 +3198,22 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             console.error('VS Code file pick failed', error);
             toast.error(error instanceof Error ? error.message : t('chat.chatInput.toast.vscodePickFailed'));
         }
-    }, [attachFiles, isBtwActive, t, vscodeApi]);
+    }, [attachFiles, t, vscodeApi]);
 
     const handlePickLocalFiles = React.useCallback(() => {
-        if (isBtwActive) return;
         if (isVSCodeRuntime()) {
             void handleVSCodePickFiles();
             return;
         }
         fileInputRef.current?.click();
-    }, [handleVSCodePickFiles, isBtwActive]);
+    }, [handleVSCodePickFiles]);
 
     const handleLocalFileSelect = React.useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
-        if (isBtwActive) {
-            event.target.value = '';
-            return;
-        }
         const files = event.target.files;
         if (!files) return;
         await attachFiles(files);
         event.target.value = '';
-    }, [attachFiles, isBtwActive]);
+    }, [attachFiles]);
 
     const footerGapClass = 'gap-x-1.5 gap-y-0';
     const isVSCode = isVSCodeRuntime();
@@ -3230,6 +3252,10 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         const installed = useGuestsStore.getState().guests.find((entry) => entry.id === issue.providerId);
         if (!installed || !isGuestActive(installed)) {
             toast.info(t('chat.chatInput.toast.guestUnavailableHere'));
+            return;
+        }
+        if (!installed.entry) {
+            toast.info(t('chat.chatInput.toast.guestHasNoPanel'));
             return;
         }
         const guest = guestAttachItems.find((entry) => entry.id === issue.providerId);
@@ -3277,10 +3303,6 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         }
     }, [consumePendingGuestIssue, handleGuestAttach, pendingGuestIssue]);
     const showLinearPicker = Boolean(runtimeLinear) && !isVSCode;
-    // The work-status panel carries the agent's todos, but only on the
-    // desktop/web layout — VS Code and mobile have no panel, so the todos keep
-    // their place above the composer there.
-    const composerStatusExtrasEnabled = isVSCode || isMobile;
     const showDraftTargetSelectors = newSessionDraftOpen && !isVSCode;
 
     // Which project and directory a new session will target.
@@ -3353,6 +3375,18 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     });
     const mobileComposerExpanded = mobileShell.expanded;
     const mobileTextareaFocused = mobileShell.focused;
+
+    // Mobile comment mode: subscription, scope ownership and the attach/cancel
+    // transitions live in the hook; ChatInput only renders from it.
+    const mobileComment = useMobileCommentComposerMode({
+        isMobile,
+        runtimeKey: activeRuntimeKey,
+        directory: inlineDraftDirectory,
+        sessionKey: inlineDraftSessionKey,
+        mobileShell,
+    });
+    const mobileCommentActive = mobileComment.active;
+    attachMobileCommentRef.current = mobileComment.submit;
 
 
     const applyAssistSuggestion = React.useCallback((text: string) => {
@@ -3428,7 +3462,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     // The suggested follow-up is the composer's own top row on every surface
     // (inside the mobile pill and the box alike); on mobile the model and
     // agent are its bottom row too, so the surface stays one shape.
-    const suggestionHidden = hasContent || newSessionDraftOpen || isBtwActive || isBtwPanelVisible || hasQueuedMessages;
+    const suggestionHidden = hasContent || newSessionDraftOpen || isBtwActive || isBtwPanelVisible || hasQueuedMessages || hasPendingForm;
     const suggestionRow = !isBtwActive ? (
         <SessionSuggestionChip
             sessionId={currentSessionId}
@@ -3465,11 +3499,6 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         composerRef.current?.blur();
     }, []);
 
-
-    // Reset the picker search whenever a draft picker sheet opens/closes.
-    React.useEffect(() => {
-        setMobileDraftPickerQuery('');
-    }, [mobileDraftPicker]);
 
     // Mobile browsers pan the visual viewport instead of resizing the layout,
     // so the composer form is pinned to it explicitly.
@@ -3557,7 +3586,16 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                 event.stopPropagation();
                 handleExitBtw();
             }}
-            onSubmit={(e) => { e.preventDefault(); handlePrimaryAction(); }}
+            onSubmit={(e) => {
+                e.preventDefault();
+                // Comment mode owns the form: submit attaches the comment and
+                // must never reach the send path.
+                if (mobileCommentActive) {
+                    attachMobileCommentRef.current();
+                    return;
+                }
+                handlePrimaryAction();
+            }}
             className={cn(
                 "relative w-full pt-0 pb-4",
                 isDesktopExpanded && 'flex h-full min-h-0 flex-col pt-4',
@@ -3579,6 +3617,10 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                 </div>
             ) : null}
             <div className={cn('chat-input-column relative overflow-visible', isComposerExpanded && 'flex flex-1 min-h-0 flex-col')}>
+                {/* Comment mode shows only its own shell: the normal composer's
+                    furniture (chips, banners, draft selectors) stays in state
+                    and returns unchanged when the comment exits. */}
+                {!mobileCommentActive ? (<>
                 <AutoReviewBanner />
                 {hasDrafts ? (
                     <ComposerContextChips
@@ -3591,7 +3633,6 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                     sessionId={currentSessionId}
                     directory={currentSessionDirectoryForSync ?? currentDirectory}
                 />
-                <MemoComposerStatusBar showTodos={composerStatusExtrasEnabled} />
                 {!isMobile && (showDraftTargetSelectors || draftPresentationExiting) && selectedDraftProject ? (
                     <div className={draftPresentationClassName}>
                         <DraftTargetSelectors
@@ -3621,6 +3662,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                         onOpenPicker={setMobileDraftPicker}
                     />
                 ) : null}
+                </>) : null}
                 <div
                     // Desktop: layout-transparent. Mobile: positioning host for
                     // the wrapper-level dictation overlay across pill/full states.
@@ -3631,7 +3673,17 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                         isMobileExpanded && 'flex min-h-0 flex-1 flex-col',
                     )}
                 >
-                {isMobile && !mobileComposerExpanded && !isBtwActive ? (
+                {mobileCommentActive && mobileComment.draft.status === 'open' ? (
+                    // Keyed by generation: a replaced open remounts the shell
+                    // so its dictation callbacks can never target the
+                    // previous quote.
+                    <MobileCommentComposer
+                        key={mobileComment.draft.generation}
+                        draft={mobileComment.draft}
+                        theme={currentTheme}
+                        handlers={mobileComment.handlers}
+                    />
+                ) : isMobile && !mobileComposerExpanded && !isBtwActive ? (
                     <MobilePillComposer
                         message={message}
                         sessionId={currentSessionId}
@@ -3703,6 +3755,8 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                     )}
                     style={{ borderRadius: chatInputRadius }}
                     ref={dropZoneRef}
+                    // The mobile pill morph measures and animates this box.
+                    data-composer-box={isMobile ? 'true' : undefined}
                     onDropCapture={handleDropCapture}
                     onDragEnter={handleDragEnter}
                     onDragOver={handleDragOver}
@@ -3746,20 +3800,29 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                             </div>
                         ) : null}
                         <div className="flex items-center gap-1 px-3 pt-1 flex-wrap relative z-10">
-                            {!isBtwActive ? <AttachedFilesList onShowPopup={handleShowAttachmentPreview} className="pt-2" /> : null}
+                            <AttachedFilesList onShowPopup={handleShowAttachmentPreview} className="pt-2" />
                             {!isBtwActive ? linkedReferenceChips : null}
-                            {!isBtwActive ? <AttachedVSCodeFileChips onShowPopup={handleShowAttachmentPreview} /> : null}
+                            <AttachedVSCodeFileChips onShowPopup={handleShowAttachmentPreview} />
                             {!isBtwActive ? <ActiveEditorFileSuggestion /> : null}
                         </div>
                         <div
+                            ref={dictationHeightHostRef}
                             className={cn("relative overflow-hidden", isComposerExpanded && 'flex flex-1 min-h-0 flex-col')}
+                            // The mobile pill morph moves this block from the
+                            // pill's text line and unfurls it.
+                            data-composer-morph-prompt={isMobile ? 'true' : undefined}
                             onDragEnter={handleDragEnter}
                             onDragOver={handleDragOver}
                             onDropCapture={handleDropCapture}
                             onDrop={handleDrop}
                             onDragEnd={handleDragEnd}
-                            style={dictationContentHeight !== null
-                                ? { minHeight: `${dictationContentHeight}px` }
+                            style={dictationContentHeight !== null && !isComposerExpanded
+                                ? {
+                                    minHeight: `${Math.min(
+                                        dictationContentHeight,
+                                        dictationHeightLimit ?? dictationContentHeight,
+                                    )}px`,
+                                }
                                 : undefined}
                         >
                             <ComposerEditor
@@ -3849,6 +3912,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                         onStartDictation={toggleDictation}
                         onDictationInsert={handleDictationInsert}
                         onDictationInsertAndSend={handleDictationInsertAndSend}
+                        onDictationStart={markDictationStart}
                         onDictationContentHeightChange={handleDictationContentHeightChange}
                         isBtw={isBtwActive}
                         modelSessionId={btwComposerSessionId}
@@ -3864,8 +3928,12 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                 {/* Wrapper-level dictation engine + overlay: stays mounted across
                     the pill ↔ composer swap so a recording started from the pill
                     survives the morph. Its absolute overlay covers whichever
-                    shape the wrapper currently has. */}
-                {isMobile && !isBtwActive ? (
+                    shape the wrapper currently has. NOT mounted during comment
+                    mode: the comment shell runs its own comment-scoped engine,
+                    and two engines would both answer the global dictation
+                    toggle (an in-flight recording is discarded by the swap —
+                    its transcript must never reach the normal draft). */}
+                {isMobile && !isBtwActive && !mobileCommentActive ? (
                     <MemoComposerDictation
                         radius={chatInputRadius}
                         isMobile={isMobile}
@@ -3875,6 +3943,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                         sendIconSizeClass={sendIconSizeClass}
                         onInsert={handleDictationInsert}
                         onInsertAndSend={handleDictationInsertAndSend}
+                        onStart={markDictationStart}
                         onActiveChange={mobileShell.onDictationActiveChange}
                         onContentHeightChange={handleDictationContentHeightChange}
                         renderTrigger={false}
@@ -3898,10 +3967,22 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                     className={cn('chat-input-column mt-4', draftPresentationClassName)}
                 />
             ) : null}
+            {/* The agent's requests outrank the queue: BTW, then a permission,
+                then the form, then the queue, then the suggestion. */}
+            <PermissionDock
+                sessionId={currentSessionId}
+                directory={currentSessionDirectoryForSync ?? currentDirectory ?? undefined}
+                hidden={newSessionDraftOpen || isBtwActive || isBtwPanelVisible}
+            />
+            <FormDock
+                sessionId={currentSessionId}
+                directory={currentSessionDirectoryForSync ?? currentDirectory ?? undefined}
+                hidden={newSessionDraftOpen || isBtwActive || isBtwPanelVisible || hasPendingPermission}
+            />
             <QueuedMessageChips
                 key={parentMessageQueueKey}
                 target={parentMessageQueueTarget}
-                hidden={newSessionDraftOpen || isBtwActive || isBtwPanelVisible}
+                hidden={newSessionDraftOpen || isBtwActive || isBtwPanelVisible || hasPendingForm || mobileCommentActive}
                 onEditMessage={handleQueuedMessageEdit}
                 onSendMessage={handleQueuedMessageSend}
             />
@@ -4074,8 +4155,6 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                 theme={currentTheme}
                 openPicker={mobileDraftPicker}
                 onOpenPickerChange={setMobileDraftPicker}
-                query={mobileDraftPickerQuery}
-                onQueryChange={setMobileDraftPickerQuery}
             />
         ) : null}
         </>

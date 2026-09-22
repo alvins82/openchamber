@@ -164,7 +164,16 @@ export interface GitStatus {
   upstreamComparison?: GitRemoteComparison | null;
   files: GitStatusFile[];
   isClean: boolean;
-  diffStats?: Record<string, { insertions: number; deletions: number }>;
+  /**
+   * Per-file line stats split by Git scope. A file with edits in both scopes
+   * appears in both maps; the values are never summed into each other.
+   */
+  diffStats?: {
+    /** HEAD -> index (`git diff --cached --numstat`). */
+    staged: Record<string, { insertions: number; deletions: number }>;
+    /** index -> working tree (`git diff --numstat`). */
+    working: Record<string, { insertions: number; deletions: number }>;
+  };
   /** Present when a merge is in progress with conflicts */
   mergeInProgress?: GitMergeInProgress | null;
   /** Present when a rebase is in progress */
@@ -792,11 +801,6 @@ export interface NotificationsAPI {
 
 interface DiagnosticsAPI {
   downloadLogs(): Promise<{ fileName: string; content: string }>;
-}
-
-export interface ToolsAPI {
-
-  getAvailableTools(): Promise<string[]>;
 }
 
 export interface EditorAPI {
@@ -1479,7 +1483,6 @@ export interface RuntimeAPIs {
   push?: PushAPI;
   diagnostics?: DiagnosticsAPI;
   clientAuth?: ClientAuthAPI;
-  tools: ToolsAPI;
   editor?: EditorAPI;
   vscode?: VSCodeAPI;
   worktrees?: WorktreeMetadata[];
@@ -1585,8 +1588,6 @@ export interface SkillsInstallResponse {
   skipped?: Array<{ skillName: string; reason: string }>;
   error?: SkillsInstallError;
   requiresReload?: boolean;
-  requiresRestart?: boolean;
-  restartDeferred?: boolean;
   requiresManualRestart?: boolean;
   reloadFailed?: boolean;
   warning?: string;

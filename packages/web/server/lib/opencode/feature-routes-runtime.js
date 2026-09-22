@@ -18,6 +18,7 @@ import { registerAgentMemoryRoutes } from '../agent-memory/routes.js';
 import { registerSessionKnowledgeRoutes } from '../session-knowledge/routes.js';
 import { registerPermissionAutoAcceptRoutes } from '../permission-auto-accept/runtime.js';
 import { registerMessageQueueRoutes } from '../message-queue/runtime.js';
+import { registerRoutingPromptRewrite, registerRoutingRoutes } from '../routing/routes.js';
 import { registerConfigEntityRoutes } from './config-entity-routes.js';
 import { registerSettingsUtilityRoutes } from './core-routes.js';
 import { registerProjectIconRoutes } from './project-icon-routes.js';
@@ -31,8 +32,8 @@ import { getNpmInfo, clearCache as clearNpmCache } from './npm-registry.js';
 import { parseNpmSpec, parsePathSpec, isExactSemver } from './plugin-spec.js';
 import { registerOpenCodeRoutes } from './routes.js';
 import { getProviderSources, removeProviderConfig, upsertProviderConfig } from './providers.js';
-import { getAgentSources, getAgentConfig, createAgent, updateAgent, deleteAgent } from './agents.js';
-import { getCommandSources, createCommand, updateCommand, deleteCommand } from './commands.js';
+import { getAgentSources, getAgentConfig, getAgentPermissions, createAgent, updateAgent, deleteAgent } from './agents.js';
+import { getCommandSources, getCommandConfig, createCommand, updateCommand, deleteCommand } from './commands.js';
 import { listMcpConfigs, getMcpConfig, createMcpConfig, updateMcpConfig, deleteMcpConfig } from './mcp.js';
 import { listSnippets, getSnippet, createSnippet, updateSnippet, deleteSnippet, expandSnippets } from './snippets.js';
 import {
@@ -85,7 +86,7 @@ export const createFeatureRoutesRuntime = (dependencies) => {
         import('../walkthrough/index.js'),
         import('../walkthrough/pull-request.js'),
       ]);
-      walkthroughService = { ...service, getPullRequestDiff: pullRequest.getPullRequestDiff };
+      walkthroughService = { ...service, getPullRequestDiff: pullRequest.getPullRequestDiff, getPullRequestFileContents: pullRequest.getPullRequestFileContents };
     }
     return walkthroughService;
   };
@@ -101,6 +102,7 @@ export const createFeatureRoutesRuntime = (dependencies) => {
       resolveGitBinaryForSpawn,
       createFsSearchRuntime,
       openchamberDataDir,
+      onGuestDeactivated,
       openchamberUserConfigRoot,
       managedChatsRoot,
       normalizeDirectoryPath,
@@ -141,6 +143,7 @@ export const createFeatureRoutesRuntime = (dependencies) => {
       emitSessionCreatedEvent,
       permissionAutoAcceptRuntime,
       messageQueueRuntime,
+      routingRuntime,
       openchamberVersion,
     } = routeDependencies;
 
@@ -154,6 +157,10 @@ export const createFeatureRoutesRuntime = (dependencies) => {
 
     registerPermissionAutoAcceptRoutes(app, permissionAutoAcceptRuntime);
     registerMessageQueueRoutes(app, messageQueueRuntime);
+    registerRoutingRoutes(app, routingRuntime);
+    // Before the generic OpenCode proxy: swallows the `openchamber/auto` model
+    // switch and routes the sends that follow it.
+    registerRoutingPromptRewrite(app, routingRuntime);
 
     registerOpenCodeRoutes(app, {
       crypto,
@@ -228,10 +235,12 @@ export const createFeatureRoutesRuntime = (dependencies) => {
       clientReloadDelayMs,
       getAgentSources,
       getAgentConfig,
+      getAgentPermissions,
       createAgent,
       updateAgent,
       deleteAgent,
       getCommandSources,
+      getCommandConfig,
       createCommand,
       updateCommand,
       deleteCommand,
@@ -316,7 +325,7 @@ export const createFeatureRoutesRuntime = (dependencies) => {
     registerGitHubRoutes(app);
     registerLinearRoutes(app);
     await registerBuiltInGuests({ persistPath: extensionsPersistPath(openchamberDataDir), root: routeDependencies.builtInExtensionsDir });
-    registerGuestRoutes(app, { openchamberDataDir, openchamberVersion, resolveGitBinaryForSpawn, resolveOptionalProjectDirectory, getSmallModelService });
+    registerGuestRoutes(app, { openchamberDataDir, openchamberVersion, resolveGitBinaryForSpawn, resolveOptionalProjectDirectory, getSmallModelService, onGuestDeactivated });
     registerGitRoutes(app, {
       emitWorktreeChanged: ({ directories, at }) => {
         const clients = getOpenChamberEventClients();

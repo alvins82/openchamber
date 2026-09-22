@@ -204,6 +204,39 @@ describe('listInstalledGuests', () => {
 
     await fs.rm(dir, { recursive: true, force: true });
   });
+
+  test('a page docked beside a shared surface reaches the public row with its edge and size', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'oc-guest-'));
+    const guestRoot = path.join(dir, 'sim');
+    await fs.mkdir(path.join(guestRoot, 'panel'), { recursive: true });
+    await fs.writeFile(path.join(guestRoot, 'panel', 'index.html'), '<script src="./main.js"></script>');
+    await fs.writeFile(path.join(guestRoot, 'panel', 'main.js'), 'console.log("strip")');
+    await fs.writeFile(path.join(guestRoot, 'service.js'), 'console.log("service")');
+    await fs.writeFile(path.join(guestRoot, 'package.json'), JSON.stringify({
+      name: '@openchamber/sim',
+      version: '1.0.0',
+      openchamber: {
+        apiVersion: 1,
+        contributes: {
+          panel: { id: 'sim', name: 'Sim', icon: 'window', entry: 'panel/index.html', dock: 'right', size: 240 },
+          service: { entry: 'service.js', runtime: 'host', surface: true },
+        },
+      },
+    }));
+
+    const inspected = await inspectGuestPackage(guestRoot, { openchamberVersion: '1.0.0' });
+    expect(inspected.ok).toBe(true);
+    if (inspected.ok) {
+      expect(toPublicGuest({ ...inspected.guest, source: 'path', path: guestRoot })).toMatchObject({
+        entry: 'panel/index.html',
+        entryDock: 'right',
+        entrySize: 240,
+        service: expect.objectContaining({ surface: true }),
+      });
+    }
+
+    await fs.rm(dir, { recursive: true, force: true });
+  });
 });
 
 describe('page-less packages', () => {
@@ -263,11 +296,11 @@ describe('page-less packages', () => {
     expect(row).not.toHaveProperty('entry');
     expect(row.tools).toEqual([{ match: 'mcp.*', icon: 'icons/tool.svg', output: 'json' }]);
 
-    const hasPage = false;
-    expect((await resolveGuestServedFile(guestRoot, 'icons/tool.svg', { hasPage }))?.contentType).toBe('image/svg+xml');
-    expect(await resolveGuestServedFile(guestRoot, 'stray.html', { hasPage })).toBeNull();
-    expect(await resolveGuestServedFile(guestRoot, 'stray.js', { hasPage })).toBeNull();
-    expect((await resolveGuestServedFile(guestRoot, 'stray.html', { hasPage: true }))?.contentType).toContain('html');
+    const hasRuntime = false;
+    expect((await resolveGuestServedFile(guestRoot, 'icons/tool.svg', { hasRuntime }))?.contentType).toBe('image/svg+xml');
+    expect(await resolveGuestServedFile(guestRoot, 'stray.html', { hasRuntime })).toBeNull();
+    expect(await resolveGuestServedFile(guestRoot, 'stray.js', { hasRuntime })).toBeNull();
+    expect((await resolveGuestServedFile(guestRoot, 'stray.html', { hasRuntime: true }))?.contentType).toContain('html');
 
     await fs.rm(dir, { recursive: true, force: true });
   });

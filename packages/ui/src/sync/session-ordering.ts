@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Session } from '@opencode-ai/sdk/v2';
+import type { Session } from '@/lib/opencode/model';
 import { isSessionPinned } from '@/stores/useSessionPinnedStore';
 import { countSyncPerformance } from './performance-diagnostics';
 
@@ -41,6 +41,12 @@ const promoteSessions = (sessionIds: Iterable<string>, useSharedRank = false): v
     }
     return { rankById };
   });
+};
+
+/** Promote a confirmed restore without deriving or changing session activity. */
+export const promoteRestoredSessionOrdering = (sessionId: string): void => {
+  if (!sessionId) return;
+  promoteSessions([sessionId]);
 };
 
 export const observeSessionActivityEvent = (
