@@ -5,6 +5,7 @@ import { linearPanelI18n } from './linear-panel.i18n';
 import { routingI18n } from './routing.i18n';
 import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
+import { fileArtifactsI18n } from './file-artifacts.i18n';
 
 export const dict: Record<I18nKey, string> = {
   'sessions.aiRename.action': 'AI로 이름 변경',
@@ -36,6 +37,7 @@ export const dict: Record<I18nKey, string> = {
   ...routingI18n.ko,
   ...pluginPanelI18n.ko,
   ...surfacePanelI18n.ko,
+  ...fileArtifactsI18n.ko,
   'terminalView.actions.attachSelection': '선택한 출력 첨부',
   'terminalView.actions.copySelection': '선택한 출력 복사',
   'terminalView.toast.selectionCopied': '출력을 복사했습니다',
@@ -154,6 +156,7 @@ export const dict: Record<I18nKey, string> = {
   'mobile.header.openWorkspaceWithChangesAria': '워크스페이스 패널 열기, 커밋되지 않은 변경 사항 있음',
   'mobile.header.openMetadataAria': '세션 메타데이터 열기',
   'mobile.header.metadata.context': '컨텍스트',
+  'mobile.header.metadata.contextPending': '세션이 시작되면 컨텍스트 사용량이 표시됩니다.',
   'mobile.header.metadata.usage': '사용량',
   'mobile.menu.titleAria': '작업 공간 도구',
   'mobile.menu.files': '파일',

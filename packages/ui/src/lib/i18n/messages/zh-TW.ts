@@ -5,6 +5,7 @@ import { linearPanelI18n } from './linear-panel.i18n';
 import { routingI18n } from './routing.i18n';
 import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
+import { fileArtifactsI18n } from './file-artifacts.i18n';
 
 export const dict: Record<I18nKey, string> = {
   'sessions.aiRename.action': '使用 AI 重新命名',
@@ -36,6 +37,7 @@ export const dict: Record<I18nKey, string> = {
   ...routingI18n['zh-TW'],
   ...pluginPanelI18n['zh-TW'],
   ...surfacePanelI18n['zh-TW'],
+  ...fileArtifactsI18n['zh-TW'],
   'terminalView.actions.attachSelection': '附加所選輸出',
   'terminalView.actions.copySelection': '複製所選輸出',
   'terminalView.toast.selectionCopied': '已複製輸出',
@@ -154,6 +156,7 @@ export const dict: Record<I18nKey, string> = {
   'mobile.header.openWorkspaceWithChangesAria': '開啟工作區面板，有未提交的變更',
   'mobile.header.openMetadataAria': '開啟工作階段中繼資料',
   'mobile.header.metadata.context': '上下文',
+  'mobile.header.metadata.contextPending': '工作階段開始後將顯示上下文用量。',
   'mobile.header.metadata.usage': '用量',
   'mobile.menu.titleAria': '工作區工具',
   'mobile.menu.files': '檔案',
