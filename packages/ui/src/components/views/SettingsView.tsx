@@ -41,6 +41,7 @@ import { SnippetsSidebar } from '@/components/sections/snippets/SnippetsSidebar'
 import { SnippetsPage } from '@/components/sections/snippets/SnippetsPage';
 import { GitPage } from '@/components/sections/git-identities/GitPage';
 import { IntegrationsPage } from '@/components/sections/integrations/IntegrationsPage';
+import { RoutingPage } from '@/components/sections/routing/RoutingPage';
 import { ExtensionsPage } from '@/components/sections/extensions/ExtensionsPage';
 import type { OpenChamberSection } from '@/components/sections/openchamber/types';
 import { OpenChamberPage } from '@/components/sections/openchamber/OpenChamberPage';
@@ -55,11 +56,6 @@ import { isWindowsArm64 as isWindowsArm64Platform } from '@/lib/platform';
 import { useI18n } from '@/lib/i18n';
 import { Icon } from "@/components/icon/Icon";
 import { McpIcon } from '@/components/icons/McpIcon';
-import { OpenCodeReloadFooterAction } from '@/components/views/OpenCodeReloadFooterAction';
-import {
-  selectPendingOpenCodeRestartCount,
-  usePendingOpenCodeRestartStore,
-} from '@/stores/usePendingOpenCodeRestartStore';
 import {
   SETTINGS_PAGE_METADATA,
   getSettingsNavIcon,
@@ -103,6 +99,7 @@ const pageOrder: SettingsPageSlug[] = [
   'chat',
   'notifications',
   'sessions',
+  'routing',
   'shortcuts',
   'voice',
   'integrations',
@@ -132,10 +129,10 @@ const NAV_GROUP_ORDER = ['general', 'projects', 'opencode', 'content'] as const;
 
 const ADD_PROVIDER_SETTINGS_ID = '__add_provider__';
 
-function buildRuntimeContext(isDesktop: boolean, isMobile: boolean): SettingsRuntimeContext {
+function buildRuntimeContext(isDesktop: boolean, isMobile: boolean, routingAvailable: boolean): SettingsRuntimeContext {
   const isVSCode = isVSCodeRuntime();
   const isWeb = !isDesktop && isWebRuntime();
-  return { isVSCode, isWeb, isDesktop, isMobile };
+  return { isVSCode, isWeb, isDesktop, isMobile, routingAvailable };
 }
 
 function isPageAvailable(page: SettingsPageMeta, ctx: SettingsRuntimeContext): boolean {
@@ -192,7 +189,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
   const { t } = useI18n();
   const deviceInfo = useDeviceInfo();
   const isMobile = forceMobile ?? deviceInfo.isMobile;
-  const pendingRestartCount = usePendingOpenCodeRestartStore(selectPendingOpenCodeRestartCount);
 
   const settingsPageRaw = useUIStore((state) => state.settingsPage);
   const isSettingsDialogOpen = useUIStore((state) => state.isSettingsDialogOpen);
@@ -247,7 +243,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
 
   // keep platform check available for future window chrome tweaks
 
-  const runtimeCtx = React.useMemo(() => buildRuntimeContext(isDesktopApp, isMobile), [isDesktopApp, isMobile]);
+  const routingAvailable = useUIStore((state) => state.routingFeatureAvailable);
+  const runtimeCtx = React.useMemo(() => buildRuntimeContext(isDesktopApp, isMobile, routingAvailable), [isDesktopApp, isMobile, routingAvailable]);
 
   const visiblePages = React.useMemo(() => {
     const allowedPages = visiblePageSlugs ? new Set<SettingsPageSlug>(visiblePageSlugs) : null;
@@ -373,6 +370,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
         return t('settings.page.shortcuts.title');
       case 'sessions':
         return t('settings.page.sessions.title');
+      case 'routing':
+        return t('settings.page.routing.title');
       case 'magic-prompts':
         return t('settings.page.magicPrompts.title');
       case 'snippets':
@@ -434,8 +433,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
         oauthClientSecret: '',
         oauthScope: '',
         oauthRedirectUri: '',
-        timeout: '',
-        enabled: true,
+        oauthCallbackPort: '',
+        oauthAuthServerMetadataUrl: '',
+        protocol: 'legacy',
+        timeoutStartup: '',
+        timeoutCatalog: '',
+        timeoutExecution: '',
+        codemode: true,
+        disabled: false,
       });
       store.setSelectedMcp(name);
       return result.id === 'mcp.create' ? 'mcp.server' : result.id;
@@ -670,6 +675,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
         return <GitPage />;
       case 'integrations':
         return <IntegrationsPage />;
+      case 'routing':
+        return <RoutingPage />;
       case 'extensions':
         return <ExtensionsPage />;
       case 'general':
@@ -980,15 +987,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
             })()}
           </div>
         </ScrollableOverlay>
-
-        {/* Footer */}
-        <div className="overflow-hidden transition-opacity duration-150 opacity-100">
-          <div className="border-t border-border bg-background px-4 py-1.5 space-y-0.5 sm:bg-sidebar">
-            {(!runtimeCtx.isVSCode || pendingRestartCount > 0) && (
-              <OpenCodeReloadFooterAction />
-            )}
-          </div>
-        </div>
       </div>
     );
   };

@@ -27,11 +27,6 @@ import {
     DropdownMenuRadioItem,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import {
-    Tooltip,
-    TooltipContent,
-    TooltipTrigger,
-} from '@/components/ui/tooltip';
 import { Button } from '@/components/ui/button';
 import { toast } from '@/components/ui';
 
@@ -41,7 +36,7 @@ import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 import { DiffViewToggle } from '@/components/chat/message/DiffViewToggle';
 import type { DiffViewMode } from '@/components/chat/message/types';
 import { ReviewFlowDialog, type ReviewFlowExecution } from '@/components/session/ReviewFlowDialog';
-import { PierreDiffViewer, type DiffHunkActions } from './PierreDiffViewer';
+import { PierreDiffViewer, type ContextExpansionRequest, type DiffHunkActions } from './PierreDiffViewer';
 import { HunkActions, type HunkBusyState, type HunkDiffAction } from './git/HunkActions';
 import { useDeviceInfo } from '@/lib/device';
 import { FileTypeIcon } from '@/components/icons/FileTypeIcon';
@@ -59,8 +54,9 @@ import { WALKTHROUGH_ACTION_CLASS } from '@/components/views/walkthrough/walkthr
 import { useWalkthroughStore } from '@/stores/useWalkthroughStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useSessionMessages } from '@/sync/sync-context';
+import { opencodeClient } from '@/lib/opencode/client';
 import { getFirstChangedModifiedLineFromPatch } from './diffPatchUtils';
-import type { FileDiffMetadata } from '@pierre/diffs';
+import { parseDiffFromFile, type FileDiffMetadata } from '@pierre/diffs';
 
 // Minimum width for side-by-side diff view (px)
 const SIDE_BY_SIDE_MIN_WIDTH = 1100;
@@ -205,14 +201,6 @@ const getFirstChangedModifiedLine = (original: string, modified: string): number
     }
 
     return 1;
-};
-
-const listTurnDiffs = (value: unknown): TurnSnapshotDiff[] => {
-    if (!Array.isArray(value)) return [];
-    return value.filter((diff): diff is TurnSnapshotDiff => {
-        if (!diff || typeof diff !== 'object') return false;
-        return typeof (diff as TurnSnapshotDiff).file === 'string';
-    });
 };
 
 const statusToGitCode = (status?: string): string => {
@@ -485,6 +473,9 @@ interface InlineDiffViewerProps {
   renderSideBySide: boolean;
   wrapLines: boolean;
   hunkActions?: DiffHunkActions;
+  onExpandContextRequest?: (request: ContextExpansionRequest) => void;
+  pendingContextExpansion?: ContextExpansionRequest | null;
+  contextLoading?: boolean;
 }
 
 const InlineDiffViewer = React.memo<InlineDiffViewerProps>(({
@@ -494,6 +485,9 @@ const InlineDiffViewer = React.memo<InlineDiffViewerProps>(({
   renderSideBySide,
   wrapLines,
   hunkActions,
+  onExpandContextRequest,
+  pendingContextExpansion,
+  contextLoading,
 }) => {
   const language = React.useMemo(
     () => getLanguageFromExtension(filePath) || 'text',
@@ -530,6 +524,9 @@ const InlineDiffViewer = React.memo<InlineDiffViewerProps>(({
         wrapLines={wrapLines}
         layout="inline"
         hunkActions={hunkActions}
+        onExpandContextRequest={onExpandContextRequest}
+        pendingContextExpansion={pendingContextExpansion}
+        contextLoading={contextLoading}
       />
     </div>
   );
@@ -551,14 +548,27 @@ interface MultiFileDiffEntryProps {
     isOpeningInEditor?: boolean;
     onOpenInEditor?: (filePath: string, diffData: DiffData | null) => void;
     staged?: boolean;
+    /**
+     * Start with full file contents instead of the 3-line patch. Off in the
+     * app: a file loads in full when the user expands its collapsed context.
+     */
     loadFullFiles?: boolean;
     initialDiffData?: DiffData | null;
     comparisonDiff?: ComparisonDiffResult;
     onRetryComparisonDiff?: () => void;
+    /** Full-context variant of `comparisonDiff` for this file, fetched when the user expands collapsed context. */
+    loadFullComparisonDiff?: (filePath: string) => Promise<ComparisonDiffResult>;
     /** Hide stage/unstage/revert actions for branch and commit comparisons. */
     readOnlyActions?: boolean;
     /** Hunk mutations require a live working/index diff, never a turn snapshot. */
     hunkActionsEnabled?: boolean;
+    /**
+     * Bumped when the working tree may have changed without the status row
+     * changing: an edit inside an already-modified line keeps `+1/-1`. A live
+     * diff older than this revision is refetched in place, behind the data it
+     * still shows.
+     */
+    contentRevision?: number;
 }
 
 export const MultiFileDiffEntry = React.memo<MultiFileDiffEntryProps>(({
@@ -577,12 +587,14 @@ export const MultiFileDiffEntry = React.memo<MultiFileDiffEntryProps>(({
     isOpeningInEditor = false,
     onOpenInEditor,
     staged = false,
-    loadFullFiles = false,
+    loadFullFiles: loadAllFullFiles = false,
     initialDiffData = null,
-    comparisonDiff,
+    comparisonDiff: rangeComparisonDiff,
     onRetryComparisonDiff,
+    loadFullComparisonDiff,
     readOnlyActions = false,
     hunkActionsEnabled = false,
+    contentRevision = 0,
 }) => {
     const { t } = useI18n();
     const { git } = useRuntimeAPIs();
@@ -598,6 +610,12 @@ export const MultiFileDiffEntry = React.memo<MultiFileDiffEntryProps>(({
     const [diffRetryNonce, setDiffRetryNonce] = React.useState(0);
     const [localDiffLoadFailure, setDiffLoadFailure] = React.useState<DiffLoadFailure | null>(null);
     const [isFetching, setIsLoading] = React.useState(false);
+    // Range diffs (branch/commit) are cached per range with 3-line context;
+    // the full-context copy for this one file lives here until the range entry changes.
+    const [fullComparisonDiff, setFullComparisonDiff] = React.useState<{ source: ComparisonDiffResult; result: ComparisonDiffResult } | null>(null);
+    const comparisonDiff = fullComparisonDiff !== null && fullComparisonDiff.source === rangeComparisonDiff ? fullComparisonDiff.result : rangeComparisonDiff;
+    const canLoadFullFile = Boolean(directory) && !initialDiffData && (!rangeComparisonDiff || Boolean(loadFullComparisonDiff));
+
     const diffLoadFailure = React.useMemo<DiffLoadFailure | null>(() => {
         if (!comparisonDiff) return localDiffLoadFailure;
         return comparisonDiff.status === 'error' ? { kind: 'error', message: comparisonDiff.message } : null;
@@ -609,6 +627,27 @@ export const MultiFileDiffEntry = React.memo<MultiFileDiffEntryProps>(({
     const [forceRenderLarge, setForceRenderLarge] = React.useState(false);
     const [localDiffData, setLocalDiffData] = React.useState<DiffData | null>(null);
     const [stagedDiffData, setStagedDiffData] = React.useState<DiffData | null>(null);
+    // Set when the user expands collapsed context on the patch-only diff:
+    // this file alone switches to full contents, then replays the expansion.
+    const [contextExpansion, setContextExpansion] = React.useState<ContextExpansionRequest | null>(null);
+    const loadFullFiles = loadAllFullFiles || contextExpansion !== null;
+    React.useEffect(() => {
+        if (!contextExpansion || !loadFullComparisonDiff || !rangeComparisonDiff || rangeComparisonDiff.status !== 'ready') return;
+        if (fullComparisonDiff?.source === rangeComparisonDiff) return;
+        let cancelled = false;
+        void loadFullComparisonDiff(file.path).then((result) => {
+            if (cancelled) return;
+            if (result.status === 'error') {
+                toast.error(result.message);
+                setContextExpansion(null);
+                return;
+            }
+            setFullComparisonDiff({ source: rangeComparisonDiff, result });
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [contextExpansion, file.path, fullComparisonDiff, loadFullComparisonDiff, rangeComparisonDiff]);
     const lastDiffRequestRef = React.useRef<string | null>(null);
     const sectionRef = React.useRef<HTMLDivElement | null>(null);
 
@@ -617,7 +656,7 @@ export const MultiFileDiffEntry = React.memo<MultiFileDiffEntryProps>(({
     const desiredContextMode: DiffContextMode = loadFullFiles ? 'full' : 'patch';
     const fileStatusKey = `${file.index}:${file.working_dir}:${file.insertions}:${file.deletions}`;
     const hunkEligible = hunkActionsEnabled && !readOnlyActions && !initialDiffData && !comparisonDiff && !isImageFile(file.path);
-    const patchScope = JSON.stringify([getRuntimeKey(), directory, file.path, staged, fileStatusKey, diffRetryNonce]);
+    const patchScope = JSON.stringify([getRuntimeKey(), directory, file.path, staged, fileStatusKey, diffRetryNonce, contentRevision]);
     const actionPatch = canonicalPatch?.scope === patchScope ? canonicalPatch.patch : null;
     const actionSubmodule = canonicalPatch?.scope === patchScope ? canonicalPatch.submodule : null;
 
@@ -661,16 +700,26 @@ export const MultiFileDiffEntry = React.memo<MultiFileDiffEntryProps>(({
         lastDiffRequestRef.current = null;
     }, [fileStatusKey, staged, visible]);
 
+    // Revision the displayed live diff was fetched for. An older diff stays on
+    // screen while its replacement loads instead of collapsing to a spinner.
+    const [loadedRevision, setLoadedRevision] = React.useState(contentRevision);
+    const isDiffCurrent = loadedRevision === contentRevision;
+    React.useEffect(() => {
+        if (isDiffCurrent) return;
+        setDiffLoadFailure(null);
+        lastDiffRequestRef.current = null;
+    }, [isDiffCurrent]);
+
     React.useEffect(() => {
         if (!visible || !isExpanded || !isMounted) return;
         if (localDiffLoadFailure) return;
-        if (!directory || comparisonDiff || initialDiffData || (diffData && diffDataMatchesContextMode && (!hunkEligible || actionPatch !== null))) {
+        if (!directory || comparisonDiff || initialDiffData || (diffData && diffDataMatchesContextMode && isDiffCurrent && (!hunkEligible || actionPatch !== null))) {
             lastDiffRequestRef.current = null;
             setIsLoading(false);
             return;
         }
 
-        const requestKey = `${directory}::${file.path}::${staged ? 'staged' : 'unstaged'}::${fileStatusKey}::${desiredContextMode}::${diffRetryNonce}`;
+        const requestKey = `${directory}::${file.path}::${staged ? 'staged' : 'unstaged'}::${fileStatusKey}::${desiredContextMode}::${diffRetryNonce}::${contentRevision}`;
         if (lastDiffRequestRef.current === requestKey) {
             return;
         }
@@ -729,6 +778,7 @@ export const MultiFileDiffEntry = React.memo<MultiFileDiffEntryProps>(({
                         setDiff(directory, file.path, nextDiff, runtimeKey);
                     }
                 }
+                setLoadedRevision(contentRevision);
                 setIsLoading(false);
             })
             .catch((error) => {
@@ -751,7 +801,7 @@ export const MultiFileDiffEntry = React.memo<MultiFileDiffEntryProps>(({
                 lastDiffRequestRef.current = null;
             }
         };
-    }, [actionPatch, actionSubmodule, hunkEligible, patchScope, comparisonDiff, desiredContextMode, diffData, diffDataMatchesContextMode, diffRetryNonce, directory, fetchStatus, file.path, fileStatusKey, git, initialDiffData, isExpanded, isMounted, loadFullFiles, localDiffLoadFailure, setDiff, staged, t, visible]);
+    }, [actionPatch, actionSubmodule, contentRevision, hunkEligible, isDiffCurrent, patchScope, comparisonDiff, desiredContextMode, diffData, diffDataMatchesContextMode, diffRetryNonce, directory, fetchStatus, file.path, fileStatusKey, git, initialDiffData, isExpanded, isMounted, loadFullFiles, localDiffLoadFailure, setDiff, staged, t, visible]);
 
     const handleToggle = React.useCallback(() => {
         handleOpenChange(!isExpanded);
@@ -937,12 +987,16 @@ export const MultiFileDiffEntry = React.memo<MultiFileDiffEntryProps>(({
                             <div className="typography-ui-label font-semibold text-foreground">
                                 {diffLoadFailure.reason === 'nested_repository'
                                     ? t('diffView.unavailable.nestedRepositoryTitle')
-                                    : t('diffView.unavailable.missingTitle')}
+                                    : diffLoadFailure.reason === 'untracked_directory'
+                                        ? t('diffView.unavailable.untrackedDirectoryTitle')
+                                        : t('diffView.unavailable.missingTitle')}
                             </div>
                             <div className="typography-meta text-muted-foreground max-w-[32rem] text-center">
                                 {diffLoadFailure.reason === 'nested_repository'
                                     ? t('diffView.unavailable.nestedRepositoryDescription')
-                                    : t('diffView.unavailable.missingDescription')}
+                                    : diffLoadFailure.reason === 'untracked_directory'
+                                        ? t('diffView.unavailable.untrackedDirectoryDescription')
+                                        : t('diffView.unavailable.missingDescription')}
                             </div>
                             {diffLoadFailure.reason === 'path_not_found' ? (
                                 <button
@@ -1004,6 +1058,9 @@ export const MultiFileDiffEntry = React.memo<MultiFileDiffEntryProps>(({
                                 renderSideBySide={renderSideBySide}
                                 wrapLines={wrapLines}
                                 hunkActions={diffHunkActions}
+                                onExpandContextRequest={canLoadFullFile ? setContextExpansion : undefined}
+                                pendingContextExpansion={contextExpansion}
+                                contextLoading={contextExpansion !== null && diffData.contextMode !== 'full' && !diffLoadFailure}
                             />
                         </>
                     ) : null}
@@ -1064,9 +1121,12 @@ export const DiffView: React.FC<DiffViewProps> = ({
     const [pinnedStackedTarget, setPinnedStackedTarget] = React.useState<string | null>(null);
     const [expandedFiles, setExpandedFiles] = React.useState<Set<string>>(() => new Set());
     const [mountedStackedFiles, setMountedStackedFiles] = React.useState<Set<string>>(() => new Set());
-    const [loadFullFiles, setLoadFullFiles] = React.useState(false);
     const [scrollRequestNonce, setScrollRequestNonce] = React.useState(0);
     const [fileDiffRefreshNonce, setFileDiffRefreshNonce] = React.useState<Map<string, number>>(() => new Map());
+    // A tool completion says "something in this directory changed" without
+    // naming paths; every live diff on screen may be stale even when the
+    // status row it hangs off did not move.
+    const [workingTreeRevision, setWorkingTreeRevision] = React.useState(0);
     const [reviewDialogOpen, setReviewDialogOpen] = React.useState(false);
     const [reviewFlowSubmitting, setReviewFlowSubmitting] = React.useState(false);
     const [activeDiffScope, setActiveDiffScope] = React.useState(diffScope);
@@ -1140,14 +1200,36 @@ export const DiffView: React.FC<DiffViewProps> = ({
         });
     }, []);
 
-    const lastTurnDiffs = React.useMemo(() => {
-        for (let index = sessionMessages.length - 1; index >= 0; index -= 1) {
-            const message = sessionMessages[index] as { role?: string; summary?: { diffs?: unknown } };
-            if (message.role !== 'user') continue;
-            return listTurnDiffs(message.summary?.diffs);
-        }
-        return [];
-    }, [sessionMessages]);
+    // v1 read the last turn's diffs off a working-tree snapshot on the user
+    // message. v2 computes them on request from the turn's snapshots
+    // (`GET /api/session/:id/diff`), merged per file, so a file edited three
+    // times in one turn is one diff. Refetched whenever the transcript moves
+    // (a turn ending is what changes the answer).
+    const [lastTurnDiffs, setLastTurnDiffs] = React.useState<TurnSnapshotDiff[]>([]);
+    const lastMessageId = sessionMessages.length > 0 ? sessionMessages[sessionMessages.length - 1].id : '';
+    React.useEffect(() => {
+        if (activeDiffScope !== 'turn' || !currentSessionId || !visible) return;
+        let cancelled = false;
+        void opencodeClient.getSessionTurnDiff(currentSessionId, { directory: rootDirectory ?? undefined })
+            .then((files) => {
+                if (cancelled) return;
+                setLastTurnDiffs(files.map((entry) => ({
+                    file: entry.file,
+                    patch: entry.patch,
+                    status: entry.status,
+                    additions: entry.additions,
+                    deletions: entry.deletions,
+                })));
+            })
+            .catch((error) => {
+                if (cancelled) return;
+                console.warn('[diff-view] turn diff unavailable:', error instanceof Error ? error.message : error);
+                setLastTurnDiffs([]);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [activeDiffScope, currentSessionId, lastMessageId, rootDirectory, visible]);
 
     const lastTurnDiffData = React.useMemo(() => {
         const map = new Map<string, DiffData>();
@@ -1276,7 +1358,7 @@ export const DiffView: React.FC<DiffViewProps> = ({
         return null;
     }, [activeDiffScope, branchBase, currentBranch, selectedCommitHash, selectedPr]);
     const comparison = useGitComparison(effectiveDirectory ?? null, comparisonSource, visible && !isVSCodeRuntime(), activeDiffScope === 'branch' ? branchRevision : '');
-    const { fetchDiff: loadComparisonDiff } = comparison;
+    const { fetchDiff: loadComparisonDiff, fetchFullFile: loadComparisonFullFile } = comparison;
     const commitFiles = activeDiffScope === 'commit' ? comparison.files : null;
     const commitFilesError = activeDiffScope === 'commit' ? comparison.error : null;
     const branchFiles = activeDiffScope === 'branch' ? comparison.files : null;
@@ -1294,16 +1376,41 @@ export const DiffView: React.FC<DiffViewProps> = ({
     );
 
     const fetchComparisonDiffEntry = React.useCallback(
-        async (filePath: string): Promise<ComparisonDiffResult> => {
+        async (filePath: string, fullContext = false): Promise<ComparisonDiffResult> => {
             try {
-                const fullContext = loadFullFiles && activeDiffScope !== 'pr';
                 const response = await loadComparisonDiff(filePath, fullContext ? FULL_CONTEXT_DIFF_LINES : DEFAULT_CONTEXT_DIFF_LINES);
                 return { status: 'ready', data: createTextDiffDataFromPatch(filePath, response.diff, fullContext ? 'full' : 'patch') };
             } catch (error) {
                 return { status: 'error', message: error instanceof Error ? error.message : t('diffView.state.failedToLoadDiff') };
             }
         },
-        [activeDiffScope, loadComparisonDiff, loadFullFiles, t]
+        [loadComparisonDiff, t]
+    );
+    // Branch and commit diffs are re-read from git with the whole file as
+    // context; a PR diff comes from GitHub at fixed context, so its full view
+    // is built from both sides of the file as GitHub has them.
+    const fetchComparisonFullFileEntry = React.useCallback(
+        async (filePath: string): Promise<ComparisonDiffResult> => {
+            try {
+                const { original, modified } = await loadComparisonFullFile(filePath);
+                // Complete-file metadata, like the git-backed full patches: the
+                // viewer keeps the highlighted partial diff on screen until this
+                // one is highlighted, then replays the requested expansion.
+                const fileDiff = parseDiffFromFile({ name: filePath, contents: original }, { name: filePath, contents: modified });
+                return { status: 'ready', data: { original, modified, fileDiff, contextMode: 'full' } };
+            } catch (error) {
+                return { status: 'error', message: error instanceof Error ? error.message : t('diffView.state.failedToLoadDiff') };
+            }
+        },
+        [loadComparisonFullFile, t]
+    );
+    const loadFullComparisonDiff = React.useMemo(
+        () => activeDiffScope === 'branch' || activeDiffScope === 'commit'
+            ? (filePath: string) => fetchComparisonDiffEntry(filePath, true)
+            : activeDiffScope === 'pr'
+            ? fetchComparisonFullFileEntry
+            : undefined,
+        [activeDiffScope, fetchComparisonDiffEntry, fetchComparisonFullFileEntry]
     );
 
     const comparisonDiffData = useRangeKeyedCache<ComparisonDiffResult>(
@@ -1311,7 +1418,7 @@ export const DiffView: React.FC<DiffViewProps> = ({
         visible ? comparisonPathsKey : '',
         comparisonRangeKey ? fetchComparisonDiffEntry : null,
         EMPTY_COMPARISON_DIFF,
-        JSON.stringify([activeDiffScope === 'branch' ? branchRevision : '', activeDiffScope === 'pr' ? comparison.revision : 0, comparisonRetryRevision, loadFullFiles])
+        JSON.stringify([activeDiffScope === 'branch' ? branchRevision : '', activeDiffScope === 'pr' ? comparison.revision : 0, comparisonRetryRevision])
     );
 
     const branchFileCount = branchFiles?.length ?? null;
@@ -1351,21 +1458,39 @@ export const DiffView: React.FC<DiffViewProps> = ({
         }
 
         if (!status?.files) return [];
-        const diffStats = status.diffStats ?? {};
+        const diffStats = status.diffStats;
         const includeFile = activeDiffScope === 'staged'
             ? isStagedStatusFile
             : activeDiffScope === 'working'
                 ? isWorkingStatusFile
                 : () => true;
 
+        const statsForFile = (filePath: string): { insertions: number; deletions: number } => {
+            const staged = diffStats?.staged?.[filePath];
+            const working = diffStats?.working?.[filePath];
+            if (activeDiffScope === 'staged') {
+                return { insertions: staged?.insertions ?? 0, deletions: staged?.deletions ?? 0 };
+            }
+            if (activeDiffScope === 'working') {
+                return { insertions: working?.insertions ?? 0, deletions: working?.deletions ?? 0 };
+            }
+            return {
+                insertions: (staged?.insertions ?? 0) + (working?.insertions ?? 0),
+                deletions: (staged?.deletions ?? 0) + (working?.deletions ?? 0),
+            };
+        };
+
         return status.files
             .filter(includeFile)
-            .map((file) => ({
-                ...file,
-                insertions: diffStats[file.path]?.insertions ?? 0,
-                deletions: diffStats[file.path]?.deletions ?? 0,
-                isNew: isNewStatusFile(file),
-            }))
+            .map((file) => {
+                const stats = statsForFile(file.path);
+                return {
+                    ...file,
+                    insertions: stats.insertions,
+                    deletions: stats.deletions,
+                    isNew: isNewStatusFile(file),
+                };
+            })
             .sort((a, b) => a.path.localeCompare(b.path));
     }, [activeDiffScope, branchFiles, comparison.files, lastTurnDiffs, status]);
 
@@ -1514,19 +1639,21 @@ export const DiffView: React.FC<DiffViewProps> = ({
     }, [effectiveDirectory, setActiveDirectory, ensureStatus, git, visible]);
 
     const refreshScope = JSON.stringify([runtimeKey, effectiveDirectory]);
-    const deferredRefreshRef = React.useRef({ scope: refreshScope, paths: new Set<string>(), dirty: false });
+    const deferredRefreshRef = React.useRef({ scope: refreshScope, paths: new Set<string>(), dirty: false, unscoped: false });
     const wasVisibleRef = React.useRef(visible);
     React.useEffect(() => {
         const resumed = visible && !wasVisibleRef.current;
         wasVisibleRef.current = visible;
         if (deferredRefreshRef.current.scope !== refreshScope) {
-            deferredRefreshRef.current = { scope: refreshScope, paths: new Set(), dirty: false };
+            deferredRefreshRef.current = { scope: refreshScope, paths: new Set(), dirty: false, unscoped: false };
         }
         if (!effectiveDirectory) {
             return;
         }
-        const refresh = (paths?: string[]) => {
-            if (paths?.length) {
+        // Named paths remount their entries; an unscoped hint refetches every
+        // live diff in place, since it cannot tell which one changed.
+        const refresh = (paths: string[], unscoped: boolean) => {
+            if (paths.length) {
                 pendingScrollAnchorRestoreRef.current = captureScrollAnchor() ?? lastScrollAnchorRef.current;
                 clearDiffCache(effectiveDirectory, paths);
                 setFileDiffRefreshNonce((previous) => {
@@ -1537,22 +1664,29 @@ export const DiffView: React.FC<DiffViewProps> = ({
                     return next;
                 });
             }
+            if (unscoped) {
+                setWorkingTreeRevision((previous) => previous + 1);
+            }
             void fetchStatus(effectiveDirectory, git, { silent: true });
         };
         const deferred = deferredRefreshRef.current;
         if (visible && (resumed || deferred.dirty)) {
-            refresh([...deferred.paths]);
+            refresh([...deferred.paths], deferred.unscoped);
             deferred.paths.clear();
             deferred.dirty = false;
+            deferred.unscoped = false;
         }
         return sessionEvents.onGitRefreshHint((hint) => {
             if (normalizePath(hint.directory) !== normalizePath(effectiveDirectory)) return;
+            const paths = hint.paths ?? [];
+            const unscoped = paths.length === 0;
             if (!visible) {
                 deferred.dirty = true;
-                for (const path of hint.paths ?? []) deferred.paths.add(path);
+                deferred.unscoped ||= unscoped;
+                for (const path of paths) deferred.paths.add(path);
                 return;
             }
-            refresh(hint.paths);
+            refresh(paths, unscoped);
         });
     }, [captureScrollAnchor, clearDiffCache, effectiveDirectory, fetchStatus, git, refreshScope, visible]);
 
@@ -1965,13 +2099,14 @@ export const DiffView: React.FC<DiffViewProps> = ({
                                         void openFileInEditorAtChange(filePath, diffData);
                                     }}
                                     staged={getFileStaged(file.path)}
-                                    loadFullFiles={loadFullFiles && activeDiffScope !== 'pr'}
                                     readOnlyActions={activeDiffScope === 'branch' || activeDiffScope === 'commit' || activeDiffScope === 'pr'}
                                     hunkActionsEnabled={activeDiffScope === 'all' || activeDiffScope === 'working' || activeDiffScope === 'staged'}
+                                    contentRevision={workingTreeRevision}
                                     comparisonDiff={activeDiffScope === 'branch' || activeDiffScope === 'commit' || activeDiffScope === 'pr'
                                         ? comparisonDiffData.get(file.path) ?? EMPTY_COMPARISON_DIFF
                                         : undefined}
                                     onRetryComparisonDiff={() => setComparisonRetryRevision((revision) => revision + 1)}
+                                    loadFullComparisonDiff={loadFullComparisonDiff}
                                     initialDiffData={
                                         activeDiffScope === 'turn'
                                             ? lastTurnDiffData.get(file.path) ?? null
@@ -2250,28 +2385,6 @@ export const DiffView: React.FC<DiffViewProps> = ({
                             {t('walkthrough.action.open')}
                         </span>
                     </Button>
-                )}
-                {changedFiles.length > 0 && activeDiffScope !== 'pr' && (
-                    <Tooltip>
-                        <TooltipTrigger asChild>
-                            <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => setLoadFullFiles((value) => !value)}
-                                aria-pressed={loadFullFiles}
-                                aria-label={loadFullFiles ? t('diffView.actions.disableFullFiles') : t('diffView.actions.loadFullFiles')}
-                                className={cn(
-                                    'h-7 w-7 flex-shrink-0 p-0 text-muted-foreground hover:text-foreground',
-                                    loadFullFiles && 'bg-interactive-selection text-interactive-selection-foreground',
-                                )}
-                            >
-                                <Icon name="file-download" className="size-4" />
-                            </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>
-                            <p>{loadFullFiles ? t('diffView.actions.disableFullFiles') : t('diffView.actions.loadFullFiles')}</p>
-                        </TooltipContent>
-                    </Tooltip>
                 )}
                 {changedFiles.length > 0 && (
                     <Button

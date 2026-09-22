@@ -121,6 +121,13 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     isAvailable: (ctx) => ctx.isMobile && ctx.isWeb && !ctx.isDesktop && !ctx.isVSCode,
   },
   {
+    id: 'appearance.animated-activity-indicators',
+    page: 'appearance',
+    titleKey: 'settings.openchamber.visual.field.animatedActivityIndicators',
+    descriptionKey: 'settings.openchamber.visual.field.animatedActivityIndicatorsInfo',
+    keywords: ['spinner', 'animation', 'session', 'activity', 'motion', 'running', 'indicator'],
+  },
+  {
     id: 'appearance.interface-font-size',
     page: 'appearance',
     titleKey: 'settings.openchamber.visual.field.interfaceFontSize',
@@ -408,6 +415,7 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     titleKey: 'settings.openchamber.visual.field.enterToSend',
     descriptionKey: 'settings.openchamber.visual.field.enterToSendHint',
     keywords: ['enter', 'shift enter', 'ctrl enter', 'cmd enter', 'mod enter', 'send', 'newline'],
+    isAvailable: (ctx) => !ctx.isMobile,
   },
   {
     id: 'sessions.default-model',
@@ -567,6 +575,14 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     isAvailable: (ctx) => !ctx.isVSCode,
   },
   {
+    id: 'sessions.browser-provider',
+    page: 'general',
+    titleKey: 'settings.openchamber.tools.browserProvider.label',
+    descriptionKey: 'settings.openchamber.tools.browserProvider.info',
+    keywords: ['agent', 'browser', 'provider', 'extension', 'chrome', 'server', 'headless'],
+    isAvailable: (ctx) => !ctx.isVSCode,
+  },
+  {
     id: 'sessions.agent-memory-tool',
     page: 'general',
     titleKey: 'settings.openchamber.tools.field.agentMemoryTool',
@@ -575,6 +591,46 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     // Unreleased: searching for a setting that is not rendered would take the
     // user to an empty spot on the page.
     isAvailable: (ctx) => !ctx.isVSCode && useUIStore.getState().agentMemoryFeatureAvailable,
+  },
+  {
+    id: 'routing.token',
+    page: 'routing',
+    titleKey: 'settings.routing.token.label',
+    descriptionKey: 'settings.routing.token.info',
+    keywords: ['jev', 'typesafe', 'api key', 'token', 'routing', 'zen', 'free'],
+    isAvailable: (ctx) => !ctx.isVSCode && ctx.routingAvailable,
+  },
+  {
+    id: 'routing.enabled',
+    page: 'routing',
+    titleKey: 'settings.routing.auto.enable',
+    descriptionKey: 'settings.routing.auto.enableInfo',
+    keywords: ['auto', 'routing', 'model', 'jev', 'automatic'],
+    isAvailable: (ctx) => !ctx.isVSCode && ctx.routingAvailable,
+  },
+  {
+    id: 'routing.fallback-model',
+    page: 'routing',
+    titleKey: 'settings.routing.auto.fallbackModel',
+    descriptionKey: 'settings.routing.auto.fallbackModelInfo',
+    keywords: ['fallback', 'default', 'model', 'routing'],
+    isAvailable: (ctx) => !ctx.isVSCode && ctx.routingAvailable,
+  },
+  {
+    id: 'routing.safety-enabled',
+    page: 'routing',
+    titleKey: 'settings.routing.safety.enable',
+    descriptionKey: 'settings.routing.safety.enableInfo',
+    keywords: ['safety net', 'auto-accept', 'permissions', 'destructive', 'hold'],
+    isAvailable: (ctx) => !ctx.isVSCode && ctx.routingAvailable,
+  },
+  {
+    id: 'routing.add-category',
+    page: 'routing',
+    titleKey: 'settings.routing.categories.title',
+    descriptionKey: 'settings.routing.categories.description',
+    keywords: ['category', 'categories', 'task type', 'routing'],
+    isAvailable: (ctx) => !ctx.isVSCode && ctx.routingAvailable,
   },
   {
     id: 'git.identities',
@@ -699,14 +755,6 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     isAvailable: (ctx) => ctx.isDesktop,
   },
   {
-    id: 'behavior.system-prompt-optimization',
-    page: 'behavior',
-    titleKey: 'settings.behavior.page.section.systemPromptOptimization',
-    descriptionKey: 'settings.behavior.page.systemPromptOptimization.info',
-    keywords: ['system prompt', 'tokens', 'context', 'optimize', 'minimal'],
-    isAvailable: (ctx) => !ctx.isVSCode,
-  },
-  {
     id: 'behavior.system-prompt',
     page: 'behavior',
     titleKey: 'settings.behavior.page.section.systemPrompt',
@@ -773,10 +821,17 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     keywords: ['prompt', 'instructions'],
   },
   {
+    id: 'agents.steps',
+    page: 'agents',
+    titleKey: 'settings.agents.page.field.steps',
+    descriptionKey: 'settings.agents.page.field.stepsTooltip',
+    keywords: ['steps', 'loop', 'tool calls'],
+  },
+  {
     id: 'agents.permissions',
     page: 'agents',
     titleKey: 'settings.agents.page.section.toolPermissions',
-    keywords: ['tools', 'permissions', 'allow', 'ask', 'deny'],
+    keywords: ['tools', 'permissions', 'rules', 'allow', 'ask', 'deny'],
   },
   {
     id: 'commands.create',
@@ -801,6 +856,19 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     page: 'commands',
     titleKey: 'settings.agents.page.field.overrideModel',
     keywords: ['model', 'provider'],
+  },
+  {
+    id: 'commands.variant',
+    page: 'commands',
+    titleKey: 'settings.agents.page.field.variant',
+    keywords: ['variant', 'reasoning', 'thinking'],
+  },
+  {
+    id: 'commands.subagent',
+    page: 'commands',
+    titleKey: 'settings.commands.page.field.subagent',
+    descriptionKey: 'settings.commands.page.field.subagentTooltip',
+    keywords: ['subagent', 'background', 'child session'],
   },
   {
     id: 'commands.template',
@@ -836,7 +904,7 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     id: 'mcp.advanced',
     page: 'mcp',
     titleKey: 'settings.mcp.page.advanced.title',
-    keywords: ['oauth', 'headers', 'timeout'],
+    keywords: ['oauth', 'headers', 'timeout', 'code mode', 'codemode'],
   },
   {
     id: 'plugins.create',
