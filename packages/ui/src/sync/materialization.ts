@@ -1,4 +1,4 @@
-import type { Message, Part } from "@opencode-ai/sdk/v2/client"
+import type { Message, Part } from "@/lib/opencode/model"
 import { mergeMessages } from "./optimistic"
 import type { SessionMaterializationReason } from "./event-reducer"
 import { sortMessagesChronologically } from "./message-ordering"
@@ -96,6 +96,31 @@ export function getStaleRunningToolMessageID(
 function filterMaterializedParts(parts: Part[], skipPartTypes: ReadonlySet<string>): Part[] {
   return parts
     .filter((part) => !!part?.id && !skipPartTypes.has(part.type))
+}
+
+function finalizeActiveToolsInCompletedMessage(message: Message, parts: Part[]): Part[] {
+  if (message.role !== "assistant" || message.time.completed === undefined) return parts
+
+  const completedAt = message.time.completed
+  let reconciledParts = parts
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index]
+    if (part.type !== "tool" || !ACTIVE_TOOL_STATUSES.has(part.state.status)) continue
+
+    const start = getPartStateTime(part)?.start ?? completedAt
+    if (reconciledParts === parts) reconciledParts = [...parts]
+    reconciledParts[index] = {
+      ...part,
+      state: {
+        ...part.state,
+        status: "error" as const,
+        error: "Interrupted",
+        time: { start, end: completedAt },
+      },
+    }
+  }
+
+  return reconciledParts
 }
 
 function haveEquivalentPartSnapshots(left: Part[] | undefined, right: Part[]): boolean {
@@ -275,11 +300,14 @@ export function materializeSessionSnapshots(
   for (let index = 0; index < currentMessages.length; index += 1) {
     const existing = currentMessages[index]
     const incoming = incomingByID.get(existing.id)
+    // A completion the server reports supersedes a turn this client still
+    // holds open, and the local interruption mark (`interruptedTurnToolParts`)
+    // it may have put on it. Any other existing record wins over the snapshot.
     if (
       existing.role !== "assistant"
-      || existing.error?.name !== "MessageAbortedError"
       || incoming?.role !== "assistant"
       || incoming.time.completed === undefined
+      || (existing.time.completed !== undefined && existing.error?.type !== "aborted")
     ) continue
     if (reconciledCurrentMessages === currentMessages) reconciledCurrentMessages = [...currentMessages]
     reconciledCurrentMessages[index] = incoming
@@ -297,12 +325,13 @@ export function materializeSessionSnapshots(
 
     const isAssistant = record.info.role === "assistant"
     const existing = nextPartState[messageID]
-    const nextParts = mergeMaterializedParts(
+    const mergedParts = mergeMaterializedParts(
       existing,
       filterMaterializedParts(record.parts ?? [], skipPartTypes),
       skipPartTypes,
       isAssistant,
     )
+    const nextParts = finalizeActiveToolsInCompletedMessage(record.info, mergedParts)
     // For non-assistant messages an empty snapshot keeps the old "absent"
     // representation; only assistant messages need the explicit [] marker
     // (getSessionMaterializationStatus checks only assistant messages).

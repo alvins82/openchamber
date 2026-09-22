@@ -3,14 +3,14 @@ import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as net from 'net';
-import { execSync } from 'child_process';
 import { spawnSync } from 'child_process';
-import { spawn } from 'child_process';
 import { randomBytes } from 'crypto';
 import { normalizeWindowsDriveLetter } from './pathUtils';
 import { resolveWorkingDirectoryChange } from './workingDirectoryChange';
-import { registerManagedProcess, unregisterManagedProcess, reapOrphanedProcesses } from './opencodeProcessRegistry';
+import { reapOrphanedProcesses } from './opencodeProcessRegistry';
 import { applyProviderEnvAliases } from './provider-env-aliases';
+import { checkOpenCodeVersionOutput } from './opencodeVersion';
+import { spawnManagedOpenCodeProcess } from './managed-opencode-process';
 
 const t = vscode.l10n.t;
 
@@ -169,19 +169,6 @@ function stripWrappingQuotes(value: string): string {
     return trimmed.slice(1, -1).trim();
   }
   return trimmed;
-}
-
-function killProcessTree(pid: number | undefined): void {
-  if (!Number.isInteger(pid)) return;
-  if (process.platform === 'win32') {
-    try {
-      spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
-        stdio: 'ignore', timeout: 5000, windowsHide: true,
-      });
-    } catch {
-      // ignore
-    }
-  }
 }
 
 function appendToPath(dir: string) {
@@ -635,7 +622,8 @@ function applyLoginShellEnvSnapshot() {
 async function waitForReady(
   serverUrl: string,
   timeoutMs = 15000,
-  authHeaders: Record<string, string> = {}
+  authHeaders: Record<string, string> = {},
+  signal?: AbortSignal,
 ): Promise<ReadyResult> {
   const start = Date.now();
   const candidates = getCandidateBaseUrls(serverUrl);
@@ -643,36 +631,42 @@ async function waitForReady(
 
   while (Date.now() - start < timeoutMs) {
     for (const baseUrl of candidates) {
+      signal?.throwIfAborted();
       attempts += 1;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      const abort = () => controller.abort();
+      signal?.addEventListener('abort', abort, { once: true });
       try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 3000);
-
-        // OpenCode readiness check. Use /global/health for OpenCode 1.15.x compatibility.
-        const url = new URL(`${baseUrl}/global/health`);
+        // OpenCode 2.x readiness check: every route lives under /api. 2.0.8
+        // removed `/api/health`; `/api/info` replaces it and a 200 is the whole
+        // readiness answer — the payload has no `healthy` field.
+        const url = new URL(`${baseUrl}/api/info`);
         const res = await fetch(url.toString(), {
           method: 'GET',
           headers: { Accept: 'application/json', ...authHeaders },
           signal: controller.signal,
         });
 
-        let body: { healthy?: boolean, version?: string } | null = null;
+        let body: { version?: string } | null = null;
         try {
-          body = (await res.json()) as { healthy?: boolean, version?: string };
+          body = (await res.json()) as { version?: string };
         } catch {
           body = null;
         }
 
-        clearTimeout(timeout);
         getManagerOutputChannel().appendLine(
-          `Health check to ${url.toString()} returned ${res.status} with body: ${JSON.stringify(body)}`
+          `Readiness check to ${url.toString()} returned ${res.status} with body: ${JSON.stringify(body)}`
         );
 
-        if (res.ok && body?.healthy === true) {
+        if (res.ok) {
           return { ok: true, baseUrl, elapsedMs: Date.now() - start, attempts, version: body?.version ?? null };
         }
       } catch {
         // ignore
+      } finally {
+        clearTimeout(timeout);
+        signal?.removeEventListener('abort', abort);
       }
     }
 
@@ -682,109 +676,47 @@ async function waitForReady(
   return { ok: false, elapsedMs: Date.now() - start, attempts, version: null };
 }
 
-async function spawnManagedOpenCodeServer(
-  workingDirectory: string,
-  port: number,
-  timeoutMs: number
-): Promise<{ url: string; close: () => Promise<void> }> {
-  const binary = stripWrappingQuotes(process.env.OPENCODE_BINARY || 'opencode') || 'opencode';
-  const launch = resolveWindowsLaunchSpec(binary, ['serve', '--hostname', '127.0.0.1', '--port', String(port)]);
-  const child = spawn(launch.binary, launch.args, {
-    cwd: workingDirectory,
-    env: applyProviderEnvAliases({ ...process.env }),
+/**
+ * Refuses to start anything but OpenCode 2.x. A 1.x binary serves a different
+ * API surface entirely, so letting it boot produces an app that loads and then
+ * fails every request with no explanation.
+ */
+function assertSupportedOpenCodeBinary(binary: string): void {
+  const launch = resolveWindowsLaunchSpec(binary, ['--version']);
+  const result = spawnSync(launch.binary, launch.args, {
+    encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 15000,
     windowsHide: true,
   });
+  if (result.error) {
+    throw result.error;
+  }
+  const output = `${result.stdout || ''}\n${result.stderr || ''}`;
+  const check = checkOpenCodeVersionOutput(output);
+  if (!check.supported) {
+    throw new Error(check.reason);
+  }
+  getManagerOutputChannel().appendLine(`OpenCode CLI version check passed: ${check.version} (${binary})`);
+}
 
-  const url = await new Promise<string>((resolve, reject) => {
-    let output = '';
-    let settled = false;
-
-    const cleanup = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      child.stdout?.off('data', onStdout);
-      child.stderr?.off('data', onStderr);
-      child.off('exit', onExit);
-      child.off('error', onError);
-    };
-
-    const onStdout = (chunk: Buffer) => {
-      output += chunk.toString();
-      const lines = output.split('\n');
-      for (const line of lines) {
-        if (!line.startsWith('opencode server listening')) continue;
-        const match = line.match(/on\s+(https?:\/\/[^\s]+)/);
-        if (!match) {
-          cleanup();
-          reject(new Error(`Failed to parse server url from output: ${line}`));
-          return;
-        }
-        cleanup();
-        resolve(match[1]);
-        return;
-      }
-    };
-
-    const onStderr = (chunk: Buffer) => {
-      output += chunk.toString();
-    };
-
-    const onExit = (code: number | null) => {
-      cleanup();
-      const appBundleHint = isMacOpenCodeAppBundlePath(binary)
-        ? ' The configured binary appears to point at the macOS desktop app bundle; OpenChamber needs the standalone opencode CLI.'
-        : '';
-      reject(new Error(`OpenCode process exited before serving with code ${code}. Binary used: ${binary}.${appBundleHint} Output: ${output}`));
-    };
-
-    const onError = (error: Error) => {
-      cleanup();
-      reject(error);
-    };
-
-    const timer = setTimeout(() => {
-      cleanup();
-      // Surface whatever OpenCode printed while we waited — otherwise a hung or
-      // misconfigured start is indistinguishable from a slow one in the status
-      // report, leaving no thread to pull on.
-      const trimmedOutput = output.trim();
-      const outputHint = trimmedOutput ? ` Output: ${trimmedOutput}` : ' Output: (none — process printed nothing)';
-      reject(new Error(`Timeout waiting for server to start after ${timeoutMs}ms.${outputHint}`));
-    }, timeoutMs);
-
-    child.stdout?.on('data', onStdout);
-    child.stderr?.on('data', onStderr);
-    child.on('exit', onExit);
-    child.on('error', onError);
+function spawnManagedOpenCodeServer(
+  workingDirectory: string,
+  port: number,
+  timeoutMs: number,
+  signal: AbortSignal,
+) {
+  const binary = stripWrappingQuotes(process.env.OPENCODE_BINARY || 'opencode') || 'opencode';
+  assertSupportedOpenCodeBinary(binary);
+  const launch = resolveWindowsLaunchSpec(binary, ['serve', '--hostname', '127.0.0.1', '--port', String(port)]);
+  return spawnManagedOpenCodeProcess(launch.binary, launch.args, {
+    cwd: workingDirectory,
+    env: applyProviderEnvAliases({ ...process.env }),
+    port, timeoutMs, signal, sourceBinary: binary,
+    appBundleHint: isMacOpenCodeAppBundlePath(binary)
+      ? ' The configured binary points at the macOS desktop app bundle; OpenChamber needs the standalone opencode CLI.'
+      : '',
   });
-
-  // Record this child so a future run can reap it if we crash before teardown.
-  const registration = registerManagedProcess({
-    pid: child.pid,
-    ownerPid: process.pid,
-    port,
-    binary,
-    runtime: 'vscode',
-  }).catch(() => {});
-
-  return {
-    url,
-    close: async () => {
-      killProcessTree(child.pid);
-      try {
-        child.kill('SIGTERM');
-      } catch {
-        // ignore
-      }
-      // Both writes touch the same registry file. Unordered, the removal can
-      // land before the registration and leave a stale entry pointing at a dead
-      // pid; awaiting keeps the extension host alive until the file is gone.
-      await registration;
-      await unregisterManagedProcess(child.pid).catch(() => {});
-    },
-  };
 }
 
 async function allocateManagedOpenCodePort(): Promise<number> {
@@ -812,7 +744,9 @@ async function allocateManagedOpenCodePort(): Promise<number> {
 }
 
 export function createOpenCodeManager(context: vscode.ExtensionContext): OpenCodeManager {
-  let server: { url: string; close: () => Promise<void> } | null = null;
+  let server: ReturnType<typeof spawnManagedOpenCodeServer> | null = null;
+  let startupAbort: AbortController | null = null;
+  let lifecycleRevision = 0;
   let reapedOrphansOnce = false;
   let managedApiUrlOverride: string | null = null;
   let managedPassword: string | null = null;
@@ -954,6 +888,9 @@ export function createOpenCodeManager(context: vscode.ExtensionContext): OpenCod
       return;
     }
 
+    const startup = new AbortController();
+    startupAbort = startup;
+
     // Before spawning our own server, reap any OpenCode process WE spawned in a
     // prior run that was orphaned by a crash/host-kill. Verified + scoped to our
     // own pids, so it never touches a live instance's or the user's own server.
@@ -1001,23 +938,17 @@ export function createOpenCodeManager(context: vscode.ExtensionContext): OpenCod
       // Match the web runtime: keep the server process in a neutral cwd and pass
       // the selected workspace through explicit `directory` API parameters.
       const serverCwd = serverWorkingDirectory();
-      const originalCwd = process.cwd();
-      try {
-        fs.mkdirSync(serverCwd, { recursive: true });
-        process.chdir(serverCwd);
-        const port = await allocateManagedOpenCodePort();
-        server = await spawnManagedOpenCodeServer(serverCwd, port, READY_CHECK_TIMEOUT_MS);
-      } finally {
-        try {
-          process.chdir(originalCwd);
-        } catch {
-          // ignore
-        }
-      }
+      startup.signal.throwIfAborted();
+      fs.mkdirSync(serverCwd, { recursive: true });
+      const port = await allocateManagedOpenCodePort();
+      startup.signal.throwIfAborted();
+      server = spawnManagedOpenCodeServer(serverCwd, port, READY_CHECK_TIMEOUT_MS, startup.signal);
+      await server.ready;
 
       if (server && server.url) {
         // Validate readiness for the current workspace context.
-        const ready = await waitForReady(server.url, READY_CHECK_TIMEOUT_MS, getOpenCodeAuthHeaders());
+        const ready = await waitForReady(server.url, READY_CHECK_TIMEOUT_MS, getOpenCodeAuthHeaders(), startup.signal);
+        startup.signal.throwIfAborted();
         lastReadyElapsedMs = ready.elapsedMs;
         lastReadyAttempts = ready.attempts;
         if (ready.ok) {
@@ -1026,18 +957,18 @@ export function createOpenCodeManager(context: vscode.ExtensionContext): OpenCod
           version = ready.version;
           setStatus('connected');
         } else {
-          try {
-            await server.close();
-          } catch {
-            // ignore
-          }
-          server = null;
           throw new Error('Server started but health check failed');
         }
       } else {
         throw new Error('Server started but URL is missing');
       }
     } catch (err) {
+      await server?.close();
+      server = null;
+      if (startup.signal.aborted) {
+        setStatus('disconnected');
+        return;
+      }
       const message = err instanceof Error ? err.message : String(err);
 
       // Check for ENOENT or generic spawn failure which implies CLI missing
@@ -1059,42 +990,15 @@ export function createOpenCodeManager(context: vscode.ExtensionContext): OpenCod
       } else {
         setStatus('error', t('Failed to start OpenCode: {0}', message));
       }
+    } finally {
+      if (startupAbort === startup) startupAbort = null;
     }
   }
 
   async function stopInternal(): Promise<void> {
-    const portToKill = detectedPort;
-
     if (server) {
-      try {
-        await server.close();
-      } catch {
-        // Ignore close errors
-      }
+      await server.close();
       server = null;
-    }
-
-    // Kill any process listening on our port to clean up orphaned children.
-    if (portToKill) {
-      try {
-        const lsofOutput = execSync(`lsof -ti:${portToKill} 2>/dev/null || true`, {
-          encoding: 'utf8',
-          timeout: 5000
-        });
-        const myPid = process.pid;
-        for (const pidStr of lsofOutput.split(/\s+/)) {
-          const pid = parseInt(pidStr.trim(), 10);
-          if (pid && pid !== myPid) {
-            try {
-              execSync(`kill -9 ${pid} 2>/dev/null || true`, { stdio: 'ignore', timeout: 2000 });
-            } catch {
-              // Ignore
-            }
-          }
-        }
-      } catch {
-        // Ignore - process may already be dead
-      }
     }
 
     managedApiUrlOverride = null;
@@ -1103,57 +1007,47 @@ export function createOpenCodeManager(context: vscode.ExtensionContext): OpenCod
     setStatus('disconnected');
   }
 
-  async function restartInternal(): Promise<void> {
+  async function restartInternal(revision: number): Promise<void> {
     restartCount += 1;
     const restartDirectory = workingDirectory;
     await stopInternal();
     await new Promise(r => setTimeout(r, 250));
+    if (revision !== lifecycleRevision) return;
     await startInternal(restartDirectory, { rotateManaged: true });
   }
 
-  async function start(workdir?: string): Promise<void> {
-    if (pendingOperation) {
-      await pendingOperation;
-      if (server) {
-        return;
-      }
-    }
-    lastStartAttempts = 1;
-    pendingOperation = startInternal(workdir, { rotateManaged: true });
+  async function enqueueOperation(operation: () => Promise<void>): Promise<void> {
+    const pending = (pendingOperation ?? Promise.resolve()).catch(() => {}).then(operation);
+    pendingOperation = pending;
     try {
-      await pendingOperation;
+      await pending;
     } finally {
-      pendingOperation = null;
+      if (pendingOperation === pending) pendingOperation = null;
     }
   }
 
-  async function stop(): Promise<void> {
-    if (pendingOperation) {
-      await pendingOperation;
-    }
-    // Check if already stopped
-    if (!server) {
-      return;
-    }
-    pendingOperation = stopInternal();
-    try {
-      await pendingOperation;
-    } finally {
-      pendingOperation = null;
-    }
+  function start(workdir?: string): Promise<void> {
+    const revision = lifecycleRevision;
+    return enqueueOperation(async () => {
+      if (revision !== lifecycleRevision) return;
+      lastStartAttempts = 1;
+      await startInternal(workdir, { rotateManaged: true });
+    });
   }
 
-  async function restart(): Promise<void> {
-    if (pendingOperation) {
-      await pendingOperation;
-    }
-    lastStartAttempts = 1;
-    pendingOperation = restartInternal();
-    try {
-      await pendingOperation;
-    } finally {
-      pendingOperation = null;
-    }
+  function stop(): Promise<void> {
+    lifecycleRevision += 1;
+    startupAbort?.abort();
+    return enqueueOperation(stopInternal);
+  }
+
+  function restart(): Promise<void> {
+    const revision = lifecycleRevision;
+    return enqueueOperation(async () => {
+      if (revision !== lifecycleRevision) return;
+      lastStartAttempts = 1;
+      await restartInternal(revision);
+    });
   }
 
   async function setWorkingDirectory(newPath: string): Promise<SetWorkingDirectoryResult> {
