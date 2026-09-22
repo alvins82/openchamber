@@ -67,11 +67,13 @@ describe("applySessionStatusSnapshot", () => {
     test("lowers a busy session to idle when the snapshot omits it", () => {
       const store = createDirectoryStore({
         session_status: { ses_a: BUSY },
+        session_compaction: { ses_a: { startedAt: 123 } },
         message: { ses_a: completedMessage() },
       })
       const changed = applySessionStatusSnapshot(store, {} as StatusSnapshot, ["ses_a"], "authoritative")
       expect(changed).toBe(true)
       expect(store.getState().session_status.ses_a).toEqual({ type: "idle" })
+      expect(store.getState().session_compaction.ses_a).toBeUndefined()
     })
 
     test("snapshot is the source of truth: lowers to idle even if the trailing message looks unfinished", () => {

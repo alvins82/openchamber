@@ -36,6 +36,13 @@ export type ProjectMeta = {
   }
 }
 
+/** Live compaction subphase for a session. The summary stream is intentionally not retained. */
+export type SessionCompactionState = {
+  startedAt: number
+  messageID?: string
+  reason?: "auto" | "manual"
+}
+
 /** Per-directory store state */
 export type State = {
   status: "loading" | "partial" | "complete"
@@ -53,6 +60,7 @@ export type State = {
   sessionEventRevision?: Record<string, number>
   sessionDeletedRevision?: Record<string, number>
   session_status: Record<string, SessionStatus>
+  session_compaction: Record<string, SessionCompactionState>
   /** A successful status snapshot makes omitted sessions authoritatively idle. */
   sessionStatusReady?: boolean
   session_diff: Record<string, FileDiff[]>
@@ -140,6 +148,7 @@ export const INITIAL_STATE: State = {
   sessionEventRevision: {},
   sessionDeletedRevision: {},
   session_status: {},
+  session_compaction: {},
   session_diff: {},
   todo: {},
   permission: {},

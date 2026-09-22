@@ -3,14 +3,15 @@ import { z } from 'zod';
 import { isAutoModel } from '@/lib/routing/autoModel';
 import { useChatColumnSession } from '@/components/chat/chatColumnSession';
 import type { Message, Part, ReasoningPart, TextPart, ToolPart } from '@opencode-ai/sdk/v2';
+import { useI18n } from '@/lib/i18n';
 
 import type { MessageStreamPhase } from '@/stores/types/sessionTypes';
 import { useSessionUIStore } from '@/sync/session-ui-store';
-import { useDirectorySync, useSessionMessages, useSessionPermissions, useSessionQuestions, useSessionStatus } from '@/sync/sync-context';
+import { useDirectorySync, useSessionCompaction, useSessionMessages, useSessionPermissions, useSessionQuestions, useSessionStatus } from '@/sync/sync-context';
 import { isFullySyntheticMessage } from '@/lib/messages/synthetic';
 import { useCurrentSessionActivity } from './useSessionActivity';
 
-type AssistantActivity = 'idle' | 'streaming' | 'tooling' | 'cooldown' | 'permission';
+type AssistantActivity = 'idle' | 'streaming' | 'tooling' | 'compacting' | 'cooldown' | 'permission';
 
 interface WorkingSummary {
     activity: AssistantActivity;
@@ -340,6 +341,7 @@ export const getActiveAssistantContext = (messages: Message[]): ActiveAssistantC
 };
 
 export function useAssistantStatus(): AssistantStatusSnapshot {
+    const { t } = useI18n();
     // Inside the chat column, follow the session the timeline shows rather
     // than the live selection, so the status chip changes together with the
     // conversation instead of a commit ahead of it.
@@ -384,6 +386,7 @@ export function useAssistantStatus(): AssistantStatusSnapshot {
     const { phase: activityPhase, isWorking: isPhaseWorking } = useCurrentSessionActivity();
 
     const currentSessionStatus = useSessionStatus(currentSessionId ?? '', currentSessionDirectory ?? undefined);
+    const sessionCompaction = useSessionCompaction(currentSessionId ?? '', currentSessionDirectory ?? undefined);
 
     const sessionRetryAttempt = currentSessionStatus?.type === 'retry'
         ? (currentSessionStatus as { type: 'retry'; attempt?: number }).attempt
@@ -420,14 +423,17 @@ export function useAssistantStatus(): AssistantStatusSnapshot {
             };
         }
 
-        const isWorking = isPhaseWorking;
-        const isStreaming = activityPhase === 'busy';
+        const isCompacting = sessionCompaction !== undefined;
+        const isWorking = isPhaseWorking || isCompacting;
+        const isStreaming = activityPhase === 'busy' || isCompacting;
         const isCooldown = false;
-        const isRetry = activityPhase === 'retry';
+        const isRetry = activityPhase === 'retry' && !isCompacting;
 
         let activity: AssistantActivity = 'idle';
         if (isWorking) {
-            if (parsedStatus.activePartType === 'tool' || parsedStatus.activePartType === 'editing') {
+            if (isCompacting) {
+                activity = 'compacting';
+            } else if (parsedStatus.activePartType === 'tool' || parsedStatus.activePartType === 'editing') {
                 activity = 'tooling';
             } else {
                 activity = isCooldown ? 'cooldown' : 'streaming';
@@ -441,30 +447,30 @@ export function useAssistantStatus(): AssistantStatusSnapshot {
         return {
             activity,
             hasWorkingContext: isWorking,
-            hasActiveTools: parsedStatus.activePartType === 'tool' || parsedStatus.activePartType === 'editing',
+            hasActiveTools: isWorking && !isCompacting && (parsedStatus.activePartType === 'tool' || parsedStatus.activePartType === 'editing'),
             isWorking,
             isStreaming,
             isCooldown,
             lifecyclePhase: isStreaming ? 'streaming' : isCooldown ? 'cooldown' : null,
-            statusText: isWorking ? parsedStatus.statusText : null,
-            isGenericStatus: isWorking ? parsedStatus.isGenericStatus : true,
+            statusText: isWorking ? isCompacting ? t('chat.statusRow.compacting') : parsedStatus.statusText : null,
+            isGenericStatus: isWorking ? isCompacting ? false : parsedStatus.isGenericStatus : true,
             isWaitingForPermission: false,
             canAbort: isWorking,
             compactionDeadline: null,
-            activePartType: isWorking ? parsedStatus.activePartType : undefined,
-            activeToolName: isWorking ? parsedStatus.activeToolName : undefined,
+            activePartType: isWorking && !isCompacting ? parsedStatus.activePartType : undefined,
+            activeToolName: isWorking && !isCompacting ? parsedStatus.activeToolName : undefined,
             wasAborted: false,
             abortActive: false,
             lastCompletionId: null,
             isComplete: false,
             retryInfo,
         };
-    }, [activityPhase, isPhaseWorking, parsedStatus, abortState, sessionRetryAttempt, sessionRetryNext]);
+    }, [activityPhase, isPhaseWorking, parsedStatus, abortState, sessionRetryAttempt, sessionRetryNext, sessionCompaction, t]);
 
     const forming = React.useMemo<FormingSummary>(() => {
-        const isActive = isPhaseWorking && parsedStatus.activePartType === 'text';
+        const isActive = isPhaseWorking && !sessionCompaction && parsedStatus.activePartType === 'text';
         return { isActive, characterCount: 0 };
-    }, [isPhaseWorking, parsedStatus.activePartType]);
+    }, [isPhaseWorking, parsedStatus.activePartType, sessionCompaction]);
 
     const working = React.useMemo<WorkingSummary>(() => {
         if (baseWorking.wasAborted || baseWorking.abortActive) {

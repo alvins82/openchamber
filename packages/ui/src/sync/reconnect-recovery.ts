@@ -1,10 +1,12 @@
 import type { SessionStatus, Message, Part } from "@opencode-ai/sdk/v2/client"
 import type { Session } from "@opencode-ai/sdk/v2"
 import { getSessionMaterializationStatus } from "./materialization"
+import type { SessionCompactionState } from "./types"
 
 type ReconnectMaterializationState = {
   session: Session[]
   session_status?: Record<string, SessionStatus>
+  session_compaction?: Record<string, SessionCompactionState>
   message?: Record<string, Message[]>
   part?: Record<string, Part[]>
 }
@@ -105,6 +107,10 @@ export function getReconnectCandidateSessionIds(state: ReconnectMaterializationS
     if (status && status.type !== "idle") ids.add(sessionId)
   }
 
+  for (const [sessionId, compaction] of Object.entries(state.session_compaction ?? {})) {
+    if (compaction) ids.add(sessionId)
+  }
+
   for (const [sessionId, messages] of Object.entries(state.message ?? {})) {
     const lastMessage = messages[messages.length - 1]
     if (
@@ -127,6 +133,7 @@ export function getReconnectCandidateSessionIds(state: ReconnectMaterializationS
     const sessionId = viewedSession.sessionId
     const sessionExists = state.session.some((session) => session.id === sessionId)
       || Object.hasOwn(state.session_status ?? {}, sessionId)
+      || Object.hasOwn(state.session_compaction ?? {}, sessionId)
       || Object.hasOwn(state.message ?? {}, sessionId)
 
     if (sessionExists) {

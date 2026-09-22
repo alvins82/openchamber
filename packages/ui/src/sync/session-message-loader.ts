@@ -267,7 +267,7 @@ export class SessionMessageLoader {
     const current = store.getState()
     const draft = {
       message: { ...current.message }, part: { ...current.part },
-      session_status: { ...current.session_status }, session_diff: { ...current.session_diff },
+      session_status: { ...current.session_status }, session_compaction: { ...current.session_compaction }, session_diff: { ...current.session_diff },
       todo: { ...current.todo }, permission: { ...current.permission }, question: { ...current.question },
     }
     this.invalidateSession(target)

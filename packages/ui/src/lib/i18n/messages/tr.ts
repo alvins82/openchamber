@@ -2176,6 +2176,7 @@ export const dict = {
   'chat.statusRow.actions.stopGeneratingAria': 'Üretmeyi durdur',
   'chat.statusRow.tasksTitle': 'Görevler',
   'chat.statusRow.modelStatus': '{model}: {status}',
+  'chat.statusRow.compacting': 'Bağlam sıkıştırılıyor…',
   'chat.statusRow.summary.activeLeft': '{active} etkin · {left} kaldı',
   'chat.revertIndicator.redo': 'Yinele',
   'chat.revertIndicator.redoAria': 'Yinele — geri alınan mesajları geri yükle',
