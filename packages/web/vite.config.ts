@@ -104,7 +104,9 @@ export default defineConfig({
     __APP_VERSION__: JSON.stringify(packageJson.version),
   },
   optimizeDeps: {
-    include: ['@opencode-ai/sdk/v2'],
+    // These are reached through generated or lazy modules and can otherwise be
+    // discovered after the renderer connects, which triggers a one-time reload.
+    include: ['@opencode-ai/sdk/v2', 'workbox-window', '../../packages/ui > shiki'],
   },
   server: {
     port: 5173,
