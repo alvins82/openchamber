@@ -1,3 +1,5 @@
+import { installOpenCodeV2, supportsOpenCodeV2Install } from './lib/opencode/v2-install.js';
+import { describeOpenCodeCompatibility, readOpenCodeCliVersion, readExternalOpenCodeVersion } from './lib/opencode/compatibility.js';
 import 'reflect-metadata';
 import express from 'express';
 import compression from 'compression';
@@ -72,6 +74,7 @@ import { createServerUtilsRuntime } from './lib/opencode/server-utils-runtime.js
 import { createStaticRoutesRuntime } from './lib/opencode/static-routes-runtime.js';
 import { createSettingsRuntime } from './lib/opencode/settings-runtime.js';
 import { createOpenCodeResolutionRuntime } from './lib/opencode/opencode-resolution-runtime.js';
+import { runOpenCodeCliUpgrade } from './lib/opencode/cli-upgrade.js';
 import { resolveOpenCodeUpgradeCapability } from './lib/opencode/upgrade-capability.js';
 import { createBootstrapRuntime } from './lib/opencode/bootstrap-runtime.js';
 import { createSessionRuntime } from './lib/opencode/session-runtime.js';
@@ -123,7 +126,7 @@ import { createDevTunnelRuntime } from './lib/dev-tunnel/runtime.js';
 import { registerBrowserControlRoutes } from './lib/browser-control/routes.js';
 import { createManagedConfigRuntime } from './lib/opencode/managed-config-file.js';
 import { createOpenChamberSessionService } from './lib/openchamber-sessions/routes.js';
-import { createSessionMetadataStore, createUpstreamSessionMetadataReader } from './lib/openchamber-sessions/session-metadata-store.js';
+import { createSessionMetadataStore, createOpenCodeSessionMetadata } from './lib/openchamber-sessions/session-metadata-store.js';
 import { createScheduledTaskService } from './lib/scheduled-tasks/service.js';
 import { createOpenChamberControlService } from './lib/openchamber-control/service.js';
 import { OpenChamberControlError } from './lib/openchamber-control/error.js';
@@ -501,22 +504,19 @@ const broadcastOpenChamberUiEvent = createGlobalUiEventBroadcaster({
 });
 
 /**
- * Per-session OpenChamber state that OpenCode 2.x cannot hold: goal progress,
- * the assist recap, the obligatory-context cursor and pinned notes. OpenCode
- * accepts session metadata only at create time, so one store owns all of it and
- * the proxy folds it back onto the sessions it serves.
+ * Per-session OpenChamber state (goal progress, the assist recap, the
+ * obligatory-context cursor, pinned notes) lives in OpenCode's session
+ * metadata. The store merge-patches it there and migrates what older
+ * OpenChamber versions kept in `sessions-metadata.json`.
  */
 const sessionMetadataStore = createSessionMetadataStore({
   dataDir: OPENCHAMBER_DATA_DIR,
-  // A session the store has never held is seeded from OpenCode's record (what
-  // v1 wrote onto a migrated session, or what was set at create time) before
-  // the first read or write, so a patch never replaces that namespace.
   // Called, not captured: the OpenCode URL and auth helpers are declared
   // further down and only ever used once a request arrives.
-  readUpstreamMetadata: (sessionID, scope) => createUpstreamSessionMetadataReader({
-    buildOpenCodeUrl,
-    getOpenCodeAuthHeaders,
-  })(sessionID, scope),
+  openCode: {
+    read: (...args) => createOpenCodeSessionMetadata({ buildOpenCodeUrl, getOpenCodeAuthHeaders }).read(...args),
+    write: (...args) => createOpenCodeSessionMetadata({ buildOpenCodeUrl, getOpenCodeAuthHeaders }).write(...args),
+  },
 });
 
 const readStoredSessionMetadata = (sessionID) => sessionMetadataStore.get(sessionID);
@@ -529,9 +529,8 @@ const persistSessionMetadataPatch = async (sessionID, patch, { directory = '' } 
     type: 'openchamber:session-metadata',
     properties: { sessionID, metadata },
   });
-  // A goal starting or resuming used to reach the goal loop as an OpenCode
-  // `session.updated` event. OpenCode no longer carries our metadata, so the
-  // write itself is the signal — and it is the authoritative one.
+  // The write itself arms the goal loop: it is the authoritative signal and
+  // does not depend on the event stream being connected.
   // Called, not captured: the runtime is declared further down.
   if (patch?.openchamber && 'goal' in patch.openchamber) {
     void Promise.resolve(sessionGoalRuntime.notifyGoalChanged(sessionID, directory, metadata))
@@ -1105,7 +1104,7 @@ const serverUtilsRuntime = createServerUtilsRuntime({
   // Read lazily: the archive store is created with the session service further
   // down, while the proxy is registered later still.
   getArchivedSessions: () => openChamberSessionService.archiveStore.getAll(),
-  getStoredSessionMetadata: () => sessionMetadataStore.getAll(),
+  getStoredSessionMetadata: () => sessionMetadataStore.listUnmigrated(),
   fs,
   os,
   path,
@@ -1344,6 +1343,18 @@ const openCodeLifecycleRuntime = createOpenCodeLifecycleRuntime({
   },
   getManagedOpenCodeEnv: async () => (managedConfigRuntime ? managedConfigRuntime.buildManagedChildEnv() : {}),
 });
+
+const getOpenCodeCompatibility = async () => {
+  if (isExternalOpenCode || ENV_SKIP_OPENCODE_START) {
+    const base = ENV_CONFIGURED_OPENCODE_HOST?.origin || openCodeBaseUrl || `http://127.0.0.1:${openCodePort || ENV_EFFECTIVE_PORT}`;
+    const version = await readExternalOpenCodeVersion(base, getOpenCodeAuthHeaders()).catch(() => null);
+    return describeOpenCodeCompatibility(version, 'external', false);
+  }
+  const binary = ensureOpencodeCliEnv();
+  const installation = isBundledOpenCodeCliPath(binary) ? 'bundled' : 'managed';
+  const version = await readOpenCodeCliVersion(resolveManagedOpenCodeLaunchSpec(binary)).catch(() => null);
+  return describeOpenCodeCompatibility(version, installation, supportsOpenCodeV2Install());
+};
 
 const getOpenCodeUpgradeCapability = () => {
   const activeBinary = lastOpenCodeLaunchDiagnostics?.sourceBinary
@@ -1595,6 +1606,11 @@ const bootstrapOpenCodeAtStartup = async (...args) => {
   void ensureGlobalWatcherStarted().catch((error) => {
     console.warn(`Global event watcher startup failed: ${error?.message || error}`);
   });
+  // Entries the sweep cannot push now stay in the legacy file and are pushed on
+  // the session's next write or the next start.
+  void waitForOpenCodeReady()
+    .then(() => sessionMetadataStore.migrateLegacy())
+    .catch((error) => console.warn('[openchamber-sessions] session metadata migration failed:', error?.message ?? error));
 };
 const killProcessOnPort = (...args) => openCodeLifecycleRuntime.killProcessOnPort(...args);
 const waitForPortRelease = (...args) => openCodeLifecycleRuntime.waitForPortRelease(...args);
@@ -1879,6 +1895,7 @@ async function main(options = {}) {
   }));
   expressApp = app;
   server = http.createServer(app);
+  gracefulShutdownRuntime.trackServerConnections(server);
   // Same pattern for the tunnel runtime: created after the base routes so
   // /api/system/info resolves port + tunnel URL lazily at request time.
   let tunnelRuntimeContextHolder = null;
@@ -2103,6 +2120,19 @@ async function main(options = {}) {
     refreshOpenCodeAfterConfigChange,
     getOpenCodeResolutionSnapshot,
     getOpenCodeUpgradeCapability,
+    getOpenCodeCompatibility,
+    installOpenCodeV2: async () => {
+      const binary = await installOpenCodeV2({
+        env: { ...getLoginShellEnvSnapshot(), ...process.env, PATH: buildManagedOpenCodePath() },
+      });
+      await persistSettings({ opencodeBinary: binary });
+      await refreshOpenCodeAfterConfigChange('OpenCode v2 installation');
+      await waitForOpenCodeReady();
+    },
+    upgradeOpenCodeCli: () => runOpenCodeCliUpgrade(
+      resolveManagedOpenCodeLaunchSpec(lastOpenCodeLaunchDiagnostics?.sourceBinary || resolvedOpencodeBinary),
+      { env: { ...getLoginShellEnvSnapshot(), ...process.env, PATH: buildManagedOpenCodePath() }, cwd: os.homedir() },
+    ),
     formatSettingsResponse,
     readSettingsFromDisk,
     readSettingsFromDiskMigrated,
@@ -2234,6 +2264,7 @@ async function main(options = {}) {
       scheduledTasks: scheduledTasksRuntime.getStatus(),
     }),
     isReady: () => isOpenCodeReady,
+    getManagedOpenCodePreflight: () => openCodeLifecycleRuntime.getManagedOpenCodePreflight(),
     restartOpenCode: () => restartOpenCode(),
     getOpenCodeProcessInfo: () => {
       const managed = Boolean((openCodeProcess || openCodePort) && !ENV_SKIP_OPENCODE_START && !isExternalOpenCode);

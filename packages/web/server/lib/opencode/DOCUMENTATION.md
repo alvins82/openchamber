@@ -215,7 +215,7 @@ Two hard rules, both verified against v2.0.8
   - `GET /api/config/settings`
   - `PUT /api/config/settings`
   - `GET /api/config/opencode-resolution`
-  - `POST /api/opencode/upgrade` (enforces the active runtime's upgrade capability, serializes supported OpenCode upgrades, then restarts managed OpenCode so the new binary is active)
+  - `POST /api/opencode/upgrade` (enforces the active runtime's upgrade capability, shares concurrent upgrade requests and runs the resolved CLI with `upgrade`; the existing Reload action restarts managed OpenCode afterwards)
   - `GET /api/opencode/upgrade-status` (returns version availability plus the authoritative `upgrade.supported`, `upgrade.manager`, and `upgrade.reason` capability)
   - `POST /api/opencode/directory` (validates and activates an existing project directory; `{ create: true }` explicitly creates the requested project directory before activation, including outside the previously active workspace)
   - `GET /api/provider/:providerId/source`
@@ -223,6 +223,46 @@ Two hard rules, both verified against v2.0.8
   - `DELETE /api/provider/:providerId/auth`
 - Owns lazy auth library loading for provider auth checks/removal.
 - Keeps route behavior independent from composition root; `index.js` now supplies dependencies only.
+
+## CLI upgrades
+
+`cli-upgrade.js` runs the host-resolved executable and wrapper arguments with
+`upgrade`, without a shell or client-supplied arguments. OpenCode chooses the
+installer. Web, hosted mobile, Capacitor, and Desktop with a separately installed
+CLI use this server path. VS Code uses the same executor from its extension host.
+Bundled Desktop, external URL connections, unavailable CLIs, and the Windows
+ARM64 workaround remain unsupported at the host boundary.
+
+An upgrade leaves the current server running. The toast's Reload action restarts
+it using the installed version. Failed installations return an error and can be
+retried; installer output is not returned or logged because it can contain registry
+credentials. Requests from multiple clients share the in-flight operation. The
+executor supplies EOF and bounds captured output; installation has no fixed time
+limit, and the VS Code bridge does not apply its usual 30-second request timeout.
+
+### Migrating an installed v1 CLI
+
+`GET /api/opencode/compatibility` reads the local CLI version without starting
+its server, or probes an external server's JSON version contract. A confirmed
+managed v1 CLI on macOS/Linux advertises `canInstall`; bundled binaries,
+external connections and Windows do not.
+
+`POST /api/opencode/install-v2` rechecks that capability and shares one operation
+across concurrent clients. `v2-install.js` downloads the official
+`https://opencode.ai/v2/install` script, passes a validated stable v2 release
+from npm and `--no-modify-path`, then verifies the resulting executable.
+It installs into the host user's standard `~/.opencode/bin`. Existing npm/Bun
+packages remain installed; the host selects the new binary through
+`opencodeBinary`, restarts OpenCode, and waits for v2 readiness before replying.
+
+A filesystem lock prevents separate hosts sharing a home from installing at
+the same time. The installer has a five-minute deadline and owns its subprocess
+group. Existing executable/shim files are restored after an installation or
+verification failure. If rollback fails, backups and the lock remain under
+`.opencode/bin/.openchamber-install` for manual recovery. A successful install
+followed by a settings/restart failure keeps v2 on disk; Check again can retry
+the restart. A host crash may also leave the lock for manual recovery.
+Installer output is discarded, not forwarded to clients or logs.
 
 ## Public exports (session-runtime.js)
 - `createSessionRuntime({ writeSseEvent, getNotificationClients, broadcastEvent? })`: creates runtime-owned state machine and APIs for session status.
@@ -701,9 +741,10 @@ headers }` or v1 `{ npm, options }`. The stored entry is always a
 ## Public exports (shutdown-runtime.js)
 - `createGracefulShutdownRuntime(dependencies)`: creates graceful shutdown runtime for managed OpenCode and web server teardown sequencing.
 - Daemon signals, `POST /api/system/shutdown`, and embedded `stop()` share one shutdown promise. Guest admission closes synchronously before any await. Cleanup stops the relay reconciliation timer, guest viewers, realtime proxy, relay host, dictation worker and session runtimes before draining guest services, including pending starts. Each cleanup is best-effort and runs once per shutdown, including after partial startup. A hard kill still requires the separate crash/SIGKILL recovery work; no persistent registry or boot reaper is provided here.
-- After stopping owned runtimes and OpenCode, HTTP shutdown closes active connections as well as the listener. A remaining SSE response must not hold Desktop open until its fallback deadline. Upgraded sockets remain the responsibility of their owning runtime.
+- Register TCP connection tracking before the HTTP server starts listening. After stopping owned runtimes and OpenCode, HTTP shutdown closes the listener and all remaining sockets, including WebSocket upgrades and unanswered upgrade requests accepted during cleanup. This prevents client reconnects from holding Desktop open until the HTTP close deadline. Each runtime still owns its protocol cleanup; socket teardown runs afterwards and preserves the existing terminal and process grace periods.
 - Returned API:
   - `gracefulShutdown(options?)`
+  - `trackServerConnections(server)`: call once before listening; closed sockets leave the tracking set, and the server close event removes the connection listener.
 
 ## Public exports (server-startup-runtime.js)
 - `createServerStartupRuntime(dependencies)`: creates runtime for server bind/startup tunnel and process handler wiring.
@@ -806,7 +847,7 @@ within a ten-minute overall deadline.
     - Downstream heartbeats keep clients and intermediaries alive, while a separate upstream-only stall watchdog closes the downstream response when OpenCode stops producing bytes so clients reconnect instead of trusting synthetic heartbeats indefinitely. Each watchdog reset uses the current load-aware timeout, matching the shared event transport.
   - Session message forwarder: `POST /api/session/:sessionId/message`
   - Session list and detail: `GET /api/session`, `GET /api/session/:sessionID`
-    - Both are sanitized to an allowlist of `SessionInfo` fields, then get archive state folded in from `lib/openchamber-sessions/archive-store.js` and OpenChamber-owned `metadata` from `lib/openchamber-sessions/session-metadata-store.js`, because OpenCode 2.x has neither an archive route nor a session-metadata update route. An unknown answer from either store leaves the upstream record untouched rather than reporting a session as un-archived or dropping its metadata.
+    - Both are sanitized to an allowlist of `SessionInfo` fields, then get archive state folded in from `lib/openchamber-sessions/archive-store.js`, because OpenCode 2.x has no archive route, plus any `metadata` entry `lib/openchamber-sessions/session-metadata-store.js` has not migrated from the legacy file yet. An unknown answer from either store leaves the upstream record untouched rather than reporting a session as un-archived or dropping its metadata.
   - Upstream paths are the request paths. OpenCode 2.x serves everything under `/api/*` itself, so the mount prefix Express strips is put back instead of being rewritten away.
   - There is no interactive OAuth forwarder any more: v2 connects providers through `/api/integration/*`, whose OAuth steps return immediately and are polled, so no route needs a longer deadline than the ordinary one.
   - Generic `/api/*` forwarding with hop-by-hop header filtering
@@ -838,7 +879,7 @@ The VS Code extension owns its separate Git and proxy implementation.
 ## Storage and configuration
 - Provider auth: `~/.local/share/opencode/opencode.db` table `credential` (read-only), with `auth.json` as the legacy fallback; OpenCode 2.x owns credentials.
 - Session archive state: `sessions-archive.json` under the OpenChamber data dir.
-- Session metadata OpenChamber owns: `sessions-metadata.json` under the OpenChamber data dir. OpenCode 2.x accepts session metadata only at create time, so goal progress, the assist recap, the obligatory-context cursor and pinned notes live here and the proxy uses the stored metadata as the full authoritative record on the sessions it serves. The store is the single owner: every reader and writer (routes, goal loop, session assist, session knowledge, obligatory context, notifications) goes through `sessionMetadataStore.get` / `setSessionMetadata`. A session the store has never held is seeded from OpenCode's record (v1-migrated metadata, or what was set at create time) inside the same transaction as the first read or write; a seed that cannot be read fails that read or write instead of counting as empty, so a patch never replaces the record's namespace. Clearing the last metadata field persists an empty object for that session. It prevents reseeding after restart and tells both list and detail proxies to omit the removed upstream fields. A missing session entry still uses upstream metadata. Only explicit session removal drops the stored entry. Mutations, seeds, persist and rollback run one transaction at a time, for the archive store too.
+- Session metadata (goal progress, the assist recap, the obligatory-context cursor, pinned notes) lives on the OpenCode session record, written with `PATCH /api/session/{id}` (OpenCode 2.0.15+, the minimum `compatibility.js` enforces). OpenCode replaces the whole object, so `sessionMetadataStore.setSessionMetadata` reads the record, applies the JSON Merge Patch and writes the result, one write per session at a time; a record that cannot be read stops the write. Every reader and writer (routes, goal loop, session assist, session knowledge, obligatory context, notifications) goes through `sessionMetadataStore.get` / `setSessionMetadata`. Older OpenChamber versions kept this state in `sessions-metadata.json` under the data dir. Its entries are the newest metadata their sessions have: the proxy lays them over OpenCode's records, a session's next write pushes its entry, and a sweep after OpenCode starts pushes the rest (a session OpenCode no longer knows is dropped, any other failure waits for the next write or start). The emptied file is renamed to `sessions-metadata.json.migrated`. Archive mutations still run one transaction at a time in the archive store.
 - User config: `<config dir>/opencode.json(c)` where the config dir is `OPENCODE_CONFIG_DIR`, else `$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode`. The v1 `config.json` is not read.
 - Project config: `<workingDirectory>/.opencode/opencode.json(c)` first, else `<workingDirectory>/opencode.json(c)`.
 - Custom config: `OPENCODE_CONFIG` env var path.
@@ -880,3 +921,11 @@ under a running child.
   OpenChamber does not take it over. It merges its plugin directories into
   `OPENCODE_CONFIG_CONTENT` instead, and those installs keep the old behavior —
   a managed-tool toggle needs an OpenCode restart to take effect.
+
+The embedded server controller exposes `getManagedOpenCodePreflight()` for
+desktop bootstrap. It shares the lifecycle's current CLI validation promise,
+including while validation is in flight. It returns false before validation
+starts, after failure, during shutdown, or for external OpenCode. Restart clears
+the previous result, and readers discard results from a replaced preflight.
+This checks CLI compatibility, not server health; the normal startup flow still
+owns connection readiness. Explicit user compatibility checks remain fresh.

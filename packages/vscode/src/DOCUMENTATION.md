@@ -100,9 +100,14 @@ The webview build emits each worker as one self-contained file. VS Code webviews
   - Quota handlers keep managed exe.dev, Ollama Cloud, and Cursor credentials in the extension data directory with the same private-file contract as the web runtime. exe.dev uses one command-scoped usage token for the aggregate billing shared by every `exe-*` model provider.
   - `ollamaQuota.ts` owns the Ollama settings request and parser shared by credential validation and quota refresh. Both reject redirects, failed HTTP responses, and pages without parsed windows, with a 15-second request timeout. Validation finishes before the bridge writes a replacement cookie. Monthly dollar quotas and legacy session/weekly/premium quotas remain supported; zero extra-credit balances are omitted.
 
+- OpenCode v1 recovery
+  - `api:opencode/compatibility` is available even when managed startup rejects v1. The UI checks it before configuration and session bootstrap.
+  - `api:opencode/install-v2` runs the shared `v2-install.js` installer on macOS/Linux through the manager queue. Concurrent webviews share the operation. The extension selects the verified binary in the effective VS Code configuration scope, restarts, and requires connected v2 status before reporting success. Stop invalidates pending restart work.
+  - The webview bridge waits without its default 30-second timeout. External URLs and Windows use manual installation. Filesystem rollback, standard installation location and cross-process locking follow the web runtime's CLI migration contract.
+
 - `opencode-upgrade-runtime.ts`
   - Owns managed-versus-external capability decisions and latest-version checks.
-  - OpenCode 2.x removed the server-side upgrade route, so OpenChamber cannot upgrade OpenCode from inside the extension: the capability reports `supported: false` with reason `no-upgrade-route` and the upgrade request answers 409 `OPENCODE_UPGRADE_UNSUPPORTED`. Version reporting still works, so About keeps showing which OpenCode is running.
+  - Managed runtimes run the resolved CLI with `upgrade` through the manager's operation queue and the shared `packages/web/server/lib/opencode/cli-upgrade.js` executor. OpenCode chooses its installer. Concurrent webviews share one installation; failures allow another attempt. The existing Reload action restarts the server afterwards. The bridge waits for command completion without its default 30-second timeout. External connections, missing CLIs, and the Windows ARM64 workaround reject upgrades before spawning. Version checks remain available for external connections.
 
 - `bridge-permission-auto-accept-runtime.ts`
   - Owns the persisted VS Code permission auto-accept policy and its GET/PUT bridge contract.
@@ -296,24 +301,29 @@ Bridge surface (`bridge-config-runtime.ts`), matching the web routes:
 
 ## Session archive and metadata
 
-OpenCode 2.x has no route that archives a session or rewrites its metadata
-after creation, so both are OpenChamber-owned state. `openchamberSessionState.ts`
-keeps the same two files the OpenChamber server keeps
-(`sessions-archive.json`, `sessions-metadata.json`) in the shared OpenChamber
+OpenCode 2.x has no route that archives a session, so archive flags are
+OpenChamber-owned state. `openchamberSessionState.ts` keeps the same
+`sessions-archive.json` the OpenChamber server keeps, in the shared OpenChamber
 config directory (`~/.config/openchamber`, `%APPDATA%\openchamber` on
 Windows), which is also the web server's default data directory: a session
 archived from VS Code is archived in the desktop app on the same machine, and
 the other way round. Nothing is cached between calls because two processes can
-write the files; every write re-reads first and replaces the file atomically.
+write the file; every write re-reads first and replaces the file atomically.
+
+Session metadata lives on the OpenCode record (`PATCH /api/session/{id}`,
+OpenCode 2.0.15+). OpenCode replaces the whole object, so a write reads the
+record, applies the JSON Merge Patch (RFC 7386) and writes the result, and
+features sharing the `openchamber` namespace do not erase each other. An entry
+an older version left in `sessions-metadata.json` is laid over the record on
+reads and pushed to OpenCode on that session's next write, then dropped from
+the file; the web server sweeps the rest.
 
 The webview answers `POST /api/openchamber/sessions/archive|unarchive` and
 `GET|POST /api/openchamber/sessions/:id/metadata` through the
 `api:sessions/*` bridge cases in `bridge-system-runtime.ts`, and
-`bridge-proxy-runtime.ts` folds `time.archived` and stored metadata onto every
-proxied `GET /api/session` and `GET /api/session/:id` response, the same
-overlay the web proxy applies. Metadata writes are a JSON Merge Patch
-(RFC 7386), so features sharing the `openchamber` namespace do not erase each
-other.
+`bridge-proxy-runtime.ts` folds `time.archived` and not-yet-migrated metadata
+onto every proxied `GET /api/session` and `GET /api/session/:id` response, the
+same overlay the web proxy applies.
 
 ## Extension localization
 

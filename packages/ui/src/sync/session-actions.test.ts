@@ -706,7 +706,7 @@ describe("confirmed session removal", () => {
   test("moves the session to archived state after server confirmation", async () => {
     archiveBatchResponse = {
       status: 200,
-      body: { archived: [{ id: "session-a", directory: "/test/project", time: { created: 1, archived: 2 } }], failedIds: [] },
+      body: { archived: [{ id: "session-a", archivedAt: 2 }], failedIds: [] },
     }
     const source = createStore({}, {
       session: [{ id: "session-a", directory: "/test/project", time: { created: 1 } } as Session],
@@ -722,7 +722,7 @@ describe("confirmed session removal", () => {
   test("rejects an archive response that arrives after a runtime switch", async () => {
     archiveBatchResponse = {
       status: 200,
-      body: { archived: [{ id: "session-a", directory: "/test/project", time: { created: 1, archived: 2 } }], failedIds: [] },
+      body: { archived: [{ id: "session-a", archivedAt: 2 }], failedIds: [] },
     }
     const source = createStore({}, {
       session: [{ id: "session-a", directory: "/test/project", time: { created: 1 } } as Session],
@@ -747,8 +747,8 @@ describe("confirmed session removal", () => {
       status: 200,
       body: {
         archived: [
-          { id: "session-a", directory: "/test/project", time: { created: 1, archived: 2 } },
-          { id: "session-b", directory: "/test/project", time: { created: 1, archived: 2 } },
+          { id: "session-a", archivedAt: 2 },
+          { id: "session-b", archivedAt: 2 },
         ],
         failedIds: [],
       },
@@ -782,8 +782,8 @@ describe("confirmed session removal", () => {
       status: 200,
       body: {
         archived: [
-          { id: "session-a", directory: "/test/project", time: { created: 1, archived: 2 } },
-          { id: "session-b", directory: "/test/project", time: { created: 1, archived: 2 } },
+          { id: "session-a", archivedAt: 2 },
+          { id: "session-b", archivedAt: 2 },
         ],
         failedIds: [],
       },
@@ -815,11 +815,7 @@ describe("archiving a batch through the server", () => {
     ...(metadata ? { metadata } : {}),
   } as unknown as Session)
 
-  const archivedSession = (id: string): Session => ({
-    id,
-    directory: "/test/project",
-    time: { created: 1, archived: 2 },
-  } as unknown as Session)
+  const archivedSession = (id: string) => ({ id, archivedAt: 2 })
 
   beforeEach(() => {
     replyCalls.length = 0
@@ -968,12 +964,18 @@ describe("archiving a batch through the server", () => {
 })
 
 describe("session restore (unarchive)", () => {
-  const restored = (id: string, directory: string, archived = 0) => ({
-    id,
-    projectID: "project-main",
-    directory,
-    time: { created: 1, updated: 1, archived },
-  })
+  // The route answers with stamps; the full record comes from the archived
+  // list the global store already holds.
+  const restored = (id: string, directory: string, archivedAt: number | null = null) => {
+    globalArchivedSessions.push({
+      id,
+      projectID: "project-main",
+      directory,
+      title: `Title ${id}`,
+      time: { created: 1, updated: 1, archived: 5 },
+    } as unknown as Session)
+    return { id, archivedAt }
+  }
 
   beforeEach(async () => {
     replyCalls.length = 0
@@ -1014,7 +1016,8 @@ describe("session restore (unarchive)", () => {
     expect(openchamberRouteRequests).toHaveLength(1)
     expect(openchamberRouteRequests[0].path).toBe("/api/openchamber/sessions/unarchive")
     expect(openchamberRouteRequests[0].body).toMatchObject({ ids: ["session-a"] })
-    expect((globalUpsertedSessions[0] as Session)?.time?.archived).toBe(0)
+    expect((globalUpsertedSessions[0] as Session)?.time?.archived).toBeUndefined()
+    expect((globalUpsertedSessions[0] as Session)?.title).toBe("Title session-a")
     expect(registeredSessionDirectories).toEqual([{ sessionID: "session-a", directory: "/test/project" }])
     const { useSessionOrderingStore } = await import("./session-ordering")
     const rank = useSessionOrderingStore.getState().rankById.get("session-a")
@@ -1828,6 +1831,76 @@ describe("forkFromMessage composer restore", () => {
     expect(inputState.attachedFiles).toBe(sourceInput.attachedFiles)
     expect(selectedSessions).toEqual([])
     expect(source.getState()).toBe(sourceState)
+  })
+})
+
+describe("forkAfterMessage", () => {
+  const sourceSession: Session = {
+    id: "session-a",
+    projectID: "project-a",
+    directory: "/test/project",
+    title: "Source session",
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: 1, updated: 1 },
+  }
+  const forkedSession: Session = { ...sourceSession, id: "session-fork", title: "Forked session" }
+  // SAFETY: forkAfterMessage reads only id and role; the rest of the message shape is irrelevant here.
+  const message = (id: string, role: "user" | "assistant") => ({ id, role, sessionID: sourceSession.id, time: { created: 1 } }) as Message
+  const transcript = [
+    message("msg-user-1", "user"),
+    message("msg-answer-1", "assistant"),
+    message("msg-user-2", "user"),
+    message("msg-answer-2", "assistant"),
+  ]
+
+  beforeEach(() => {
+    replyCalls.length = 0
+    selectedSessions.length = 0
+    runtimeKey = "fork-runtime"
+    sessionForkResult = forkedSession
+    sessionForkError = null
+    beforeSessionForkResolve = null
+    inputState.pendingComposerRestore = null
+  })
+
+  test("cuts before the next user message so the fork keeps the answer", async () => {
+    const source = createStore({}, { session: [sourceSession], message: { [sourceSession.id]: transcript } })
+    const { forkAfterMessage, setActionRefs } = await import("./session-actions")
+    setActionRefs(createChildStores([[sourceSession.directory, source]]), () => sourceSession.directory)
+
+    await forkAfterMessage(sourceSession.id, "msg-answer-1")
+
+    expect(replyCalls).toEqual([{
+      method: "session.fork",
+      params: { sessionID: sourceSession.id, messageID: "msg-user-2", directory: sourceSession.directory },
+    }])
+    expect(selectedSessions).toEqual([{ sessionId: forkedSession.id, directoryHint: sourceSession.directory }])
+    expect(source.getState().session).toEqual([sourceSession, forkedSession])
+    expect(inputState.pendingComposerRestore).toBeNull()
+  })
+
+  test("copies the whole transcript when the answer is the last message", async () => {
+    const source = createStore({}, { session: [sourceSession], message: { [sourceSession.id]: transcript } })
+    const { forkAfterMessage, setActionRefs } = await import("./session-actions")
+    setActionRefs(createChildStores([[sourceSession.directory, source]]), () => sourceSession.directory)
+
+    await forkAfterMessage(sourceSession.id, "msg-answer-2")
+
+    expect(replyCalls).toEqual([{
+      method: "session.fork",
+      params: { sessionID: sourceSession.id, messageID: undefined, directory: sourceSession.directory },
+    }])
+  })
+
+  test("refuses to fork from a message that is not loaded", async () => {
+    const source = createStore({}, { session: [sourceSession], message: { [sourceSession.id]: transcript } })
+    const { forkAfterMessage, setActionRefs } = await import("./session-actions")
+    setActionRefs(createChildStores([[sourceSession.directory, source]]), () => sourceSession.directory)
+
+    await expect(forkAfterMessage(sourceSession.id, "msg-missing")).rejects.toThrow("Fork source message is not loaded")
+    expect(replyCalls).toEqual([])
+    expect(selectedSessions).toEqual([])
   })
 })
 
