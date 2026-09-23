@@ -6,6 +6,8 @@ import { routingI18n } from './routing.i18n';
 import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
 import { fileArtifactsI18n } from './file-artifacts.i18n';
+import { usageStatsI18n } from './usage-stats.i18n';
+import { webSearchI18n } from './websearch.i18n';
 
 export const dict: Record<I18nKey, string> = {
   "opencodeCompatibility.bundled": "OpenCode は OpenChamber に同梱されています。OpenCode v2 を利用するには OpenChamber を更新してください。",
@@ -57,6 +59,8 @@ export const dict: Record<I18nKey, string> = {
   ...pluginPanelI18n.ja,
   ...surfacePanelI18n.ja,
   ...fileArtifactsI18n.ja,
+  ...usageStatsI18n.ja,
+  ...webSearchI18n.ja,
   'terminalView.actions.attachSelection': '選択した出力を添付',
   'terminalView.actions.copySelection': '選択した出力をコピー',
   'terminalView.toast.selectionCopied': '出力をコピーしました',
@@ -1448,6 +1452,7 @@ export const dict: Record<I18nKey, string> = {
   'sidebarFilesTree.menu.download': 'ダウンロード',
   'sidebarFilesTree.menu.newFile': '新しいファイル',
   'sidebarFilesTree.menu.newFolder': '新しいフォルダ',
+  'sidebarFilesTree.menu.uploadFiles': 'ファイルをアップロード',
   'sidebarFilesTree.menu.delete': '削除',
   'sidebarFilesTree.toast.pathCopied': 'パスをコピーしました',
   'sidebarFilesTree.toast.copyFailed': 'コピーに失敗しました',
@@ -1475,6 +1480,7 @@ export const dict: Record<I18nKey, string> = {
   'sidebarFilesTree.search.clearAria': '検索をクリア',
   'sidebarFilesTree.actions.newFileTitle': '新しいファイル',
   'sidebarFilesTree.actions.newFolderTitle': '新しいフォルダ',
+  'sidebarFilesTree.actions.uploadFilesTitle': 'ファイルをアップロード',
   'sidebarFilesTree.actions.refreshTitle': '更新',
   'sidebarFilesTree.actions.collapseAllTitle': 'すべてのフォルダを折りたたむ',
   'sidebarFilesTree.actions.fileMenuTitle': 'ファイルメニュー',

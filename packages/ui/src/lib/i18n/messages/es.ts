@@ -6,6 +6,8 @@ import { routingI18n } from './routing.i18n';
 import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
 import { fileArtifactsI18n } from './file-artifacts.i18n';
+import { usageStatsI18n } from './usage-stats.i18n';
+import { webSearchI18n } from './websearch.i18n';
 
 export const dict: Record<I18nKey, string> = {
   "opencodeCompatibility.bundled": "OpenCode viene incluido en OpenChamber. Actualiza OpenChamber para obtener OpenCode v2.",
@@ -57,6 +59,8 @@ export const dict: Record<I18nKey, string> = {
   ...pluginPanelI18n.es,
   ...surfacePanelI18n.es,
   ...fileArtifactsI18n.es,
+  ...usageStatsI18n.es,
+  ...webSearchI18n.es,
   'terminalView.actions.attachSelection': 'Adjuntar salida seleccionada',
   'terminalView.actions.copySelection': 'Copiar salida seleccionada',
   'terminalView.toast.selectionCopied': 'Salida copiada',
@@ -1418,6 +1422,7 @@ export const dict: Record<I18nKey, string> = {
   "sidebarFilesTree.menu.download": "Descargar",
   "sidebarFilesTree.menu.newFile": "Nuevo archivo",
   "sidebarFilesTree.menu.newFolder": "Nueva carpeta",
+  "sidebarFilesTree.menu.uploadFiles": "Subir archivos",
   "sidebarFilesTree.menu.delete": "Eliminar",
   "sidebarFilesTree.toast.pathCopied": "Ruta copiada",
   "sidebarFilesTree.toast.copyFailed": "No se pudo copiar",
@@ -1445,6 +1450,7 @@ export const dict: Record<I18nKey, string> = {
   "sidebarFilesTree.search.clearAria": "Limpiar búsqueda",
   "sidebarFilesTree.actions.newFileTitle": "Nuevo archivo",
   "sidebarFilesTree.actions.newFolderTitle": "Nueva carpeta",
+  "sidebarFilesTree.actions.uploadFilesTitle": "Subir archivos",
   "sidebarFilesTree.actions.refreshTitle": "Actualizar",
   "sidebarFilesTree.actions.collapseAllTitle": "Contraer todas las carpetas",
   "sidebarFilesTree.actions.fileMenuTitle": "Menú de archivo",

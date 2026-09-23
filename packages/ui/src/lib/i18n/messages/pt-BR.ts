@@ -6,6 +6,8 @@ import { routingI18n } from './routing.i18n';
 import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
 import { fileArtifactsI18n } from './file-artifacts.i18n';
+import { usageStatsI18n } from './usage-stats.i18n';
+import { webSearchI18n } from './websearch.i18n';
 
 export const dict: Record<I18nKey, string> = {
   "opencodeCompatibility.bundled": "O OpenCode está incluído no OpenChamber. Atualize o OpenChamber para obter o OpenCode v2.",
@@ -57,6 +59,8 @@ export const dict: Record<I18nKey, string> = {
   ...pluginPanelI18n['pt-BR'],
   ...surfacePanelI18n['pt-BR'],
   ...fileArtifactsI18n['pt-BR'],
+  ...usageStatsI18n['pt-BR'],
+  ...webSearchI18n['pt-BR'],
   'terminalView.actions.attachSelection': 'Anexar saída selecionada',
   'terminalView.actions.copySelection': 'Copiar saída selecionada',
   'terminalView.toast.selectionCopied': 'Saída copiada',
@@ -1418,6 +1422,7 @@ export const dict: Record<I18nKey, string> = {
   "sidebarFilesTree.menu.download": "Baixar",
   "sidebarFilesTree.menu.newFile": "Novo arquivo",
   "sidebarFilesTree.menu.newFolder": "Nova pasta",
+  "sidebarFilesTree.menu.uploadFiles": "Enviar arquivos",
   "sidebarFilesTree.menu.delete": "Excluir",
   "sidebarFilesTree.toast.pathCopied": "Caminho copiada",
   "sidebarFilesTree.toast.copyFailed": "Não foi possível copiar",
@@ -1445,6 +1450,7 @@ export const dict: Record<I18nKey, string> = {
   "sidebarFilesTree.search.clearAria": "Limpar pesquisa",
   "sidebarFilesTree.actions.newFileTitle": "Novo arquivo",
   "sidebarFilesTree.actions.newFolderTitle": "Nova pasta",
+  "sidebarFilesTree.actions.uploadFilesTitle": "Enviar arquivos",
   "sidebarFilesTree.actions.refreshTitle": "Atualizar",
   "sidebarFilesTree.actions.collapseAllTitle": "Recolher todas as pastas",
   "sidebarFilesTree.actions.fileMenuTitle": "Menu do arquivo",

@@ -24,6 +24,7 @@ import type { ModelMetadata } from '@/types';
 import { getCurrentIntlLocale, useI18n } from '@/lib/i18n';
 import { runtimeFetch } from '@/lib/runtime-fetch';
 import { opencodeClient } from '@/lib/opencode/client';
+import { listWebSearchProviders } from '@/lib/opencode/websearch';
 import type { IntegrationInfo } from '@opencode/client';
 import type { Provider } from '@/lib/opencode/model';
 import { z } from 'zod';
@@ -36,6 +37,8 @@ import {
   findIntegrationForProvider,
   getCredentialConnections,
   getOAuthMethods,
+  getProviderConnections,
+  getSignInIntegrationId,
 } from './providerAuth';
 import { CustomProviderForm } from './CustomProviderForm';
 
@@ -250,11 +253,19 @@ export const ProvidersPage: React.FC = () => {
         // v2's provider list is what is configured or connected right now;
         // the providers a user can still sign in to are the integrations.
         // MCP servers with OAuth register as integrations too and are not
-        // providers, so they are left out.
-        const { data } = await opencodeClient.getSdkClient().integration.list();
+        // providers, so they are left out. So are web search providers (Exa,
+        // Tavily, ...), whose keys live in Settings → Web search; when that
+        // list cannot be read they stay in rather than hide real providers.
+        const [{ data }, webSearchProviders] = await Promise.all([
+          opencodeClient.getSdkClient().integration.list(),
+          listWebSearchProviders(opencodeClient.getDirectory() ?? null).catch(() => null),
+        ]);
         if (!isMounted) return;
+        const webSearchIds = new Set((webSearchProviders ?? []).map((provider) => provider.id));
         setAvailableProviders(parseProvidersPayload(
-          data.filter((integration) => !integration.id.startsWith('mcp_') && integration.connections.length === 0),
+          data.filter((integration) => !integration.id.startsWith('mcp_')
+            && !webSearchIds.has(integration.id)
+            && integration.connections.length === 0),
         ));
       } catch (error) {
         if (!isMounted) return;
@@ -338,7 +349,7 @@ export const ProvidersPage: React.FC = () => {
     }
     const provider = providers.find((entry) => entry.id === selectedProviderId);
     const hasCreds = providerHasCredentials({
-      connections: findIntegrationForProvider(integrations, selectedProviderId)?.connections,
+      connections: getProviderConnections(integrations, selectedProviderId),
       optionsApiKey: readProviderApiKeySetting(provider),
     });
     const isEditableCustomProvider = Boolean(
@@ -724,7 +735,9 @@ export const ProvidersPage: React.FC = () => {
                 <>
                   {(() => {
                     const candidateIntegration = findIntegrationForProvider(integrations ?? [], candidateProviderId);
-                    const candidateOAuthMethods = getOAuthMethods(candidateIntegration);
+                    const candidateOAuthMethods = getOAuthMethods(
+                      findIntegrationForProvider(integrations ?? [], getSignInIntegrationId(candidateProviderId)),
+                    );
                     const showApiKey = shouldShowApiKeyAuth(candidateIntegration);
 
                     return (
@@ -763,7 +776,7 @@ export const ProvidersPage: React.FC = () => {
                         {candidateOAuthMethods.length > 0 ? (
                           <ProviderOAuthMethods
                             key={candidateProviderId}
-                            integrationId={candidateProviderId}
+                            integrationId={getSignInIntegrationId(candidateProviderId)}
                             methods={candidateOAuthMethods}
                             onConnected={() => handleOAuthConnected(candidateProviderId)}
                             className={cn(showApiKey && 'border-t border-[var(--surface-subtle)] pt-2')}
@@ -794,14 +807,16 @@ export const ProvidersPage: React.FC = () => {
 
   const providerModels = Array.isArray(selectedProvider.models) ? selectedProvider.models : [];
   const selectedIntegration = findIntegrationForProvider(integrations ?? [], selectedProvider.id);
-  const oauthAuthMethods = getOAuthMethods(selectedIntegration);
+  const oauthAuthMethods = getOAuthMethods(
+    findIntegrationForProvider(integrations ?? [], getSignInIntegrationId(selectedProvider.id)),
+  );
   const showApiKeyAuth = shouldShowApiKeyAuth(selectedIntegration);
   const integrationsLoaded = integrations !== null;
   const sourcesLoaded = Boolean(selectedSources);
   const isEditableCustomProvider = sourcesLoaded
     && isConfigDefinedCustomProvider(selectedProvider, selectedSources);
   const hasCredentials = providerHasCredentials({
-    connections: selectedIntegration?.connections,
+    connections: getProviderConnections(integrations ?? [], selectedProvider.id),
     optionsApiKey: readProviderApiKeySetting(selectedProvider),
   });
   const authStatusIncomplete = requiresProviderAuth(integrationsLoaded, hasCredentials, isEditableCustomProvider);
@@ -944,7 +959,7 @@ export const ProvidersPage: React.FC = () => {
                 {oauthAuthMethods.length > 0 && (
                   <ProviderOAuthMethods
                     key={selectedProvider.id}
-                    integrationId={selectedProvider.id}
+                    integrationId={getSignInIntegrationId(selectedProvider.id)}
                     methods={oauthAuthMethods}
                     onConnected={() => handleOAuthConnected(selectedProvider.id)}
                     className={cn(showApiKeyAuth && 'border-t border-[var(--surface-subtle)] pt-2')}

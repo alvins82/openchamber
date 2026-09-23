@@ -5,6 +5,8 @@ import { routingI18n } from './routing.i18n';
 import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
 import { fileArtifactsI18n } from './file-artifacts.i18n';
+import { usageStatsI18n } from './usage-stats.i18n';
+import { webSearchI18n } from './websearch.i18n';
 
 export const dict = {
   "opencodeCompatibility.bundled": "OpenCode is bundled with OpenChamber. Update OpenChamber to get OpenCode v2.",
@@ -56,6 +58,8 @@ export const dict = {
   ...pluginPanelI18n.en,
   ...surfacePanelI18n.en,
   ...fileArtifactsI18n.en,
+  ...usageStatsI18n.en,
+  ...webSearchI18n.en,
   'terminalView.actions.attachSelection': 'Attach selected output',
   'terminalView.actions.copySelection': 'Copy selected output',
   'terminalView.toast.selectionCopied': 'Output copied',
@@ -1452,6 +1456,7 @@ export const dict = {
   'sidebarFilesTree.menu.download': 'Download',
   'sidebarFilesTree.menu.newFile': 'New File',
   'sidebarFilesTree.menu.newFolder': 'New Folder',
+  'sidebarFilesTree.menu.uploadFiles': 'Upload Files',
   'sidebarFilesTree.menu.delete': 'Delete',
   'sidebarFilesTree.toast.pathCopied': 'Path copied',
   'sidebarFilesTree.toast.copyFailed': 'Copy failed',
@@ -1479,6 +1484,7 @@ export const dict = {
   'sidebarFilesTree.search.clearAria': 'Clear search',
   'sidebarFilesTree.actions.newFileTitle': 'New File',
   'sidebarFilesTree.actions.newFolderTitle': 'New Folder',
+  'sidebarFilesTree.actions.uploadFilesTitle': 'Upload files',
   'sidebarFilesTree.actions.refreshTitle': 'Refresh',
   'sidebarFilesTree.actions.collapseAllTitle': 'Collapse all folders',
   'sidebarFilesTree.actions.fileMenuTitle': 'File menu',

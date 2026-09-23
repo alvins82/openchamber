@@ -102,12 +102,12 @@ The webview build emits each worker as one self-contained file. VS Code webviews
 
 - OpenCode v1 recovery
   - `api:opencode/compatibility` is available even when managed startup rejects v1. The UI checks it before configuration and session bootstrap.
-  - `api:opencode/install-v2` runs the shared `v2-install.js` installer on macOS/Linux through the manager queue. Concurrent webviews share the operation. The extension selects the verified binary in the effective VS Code configuration scope, restarts, and requires connected v2 status before reporting success. Stop invalidates pending restart work.
-  - The webview bridge waits without its default 30-second timeout. External URLs and Windows use manual installation. Filesystem rollback, standard installation location and cross-process locking follow the web runtime's CLI migration contract.
+  - `api:opencode/install-v2` runs the shared `v2-install.js` installer on macOS, Linux and Windows through the manager queue. Concurrent webviews share the operation. The extension selects the verified binary in the effective VS Code configuration scope, restarts, and requires connected v2 status before reporting success. Stop invalidates pending restart work.
+  - The webview bridge waits without its default 30-second timeout. External URLs use manual installation. Filesystem rollback, standard installation location and cross-process locking follow the web runtime's CLI migration contract.
 
 - `opencode-upgrade-runtime.ts`
   - Owns managed-versus-external capability decisions and latest-version checks.
-  - Managed runtimes run the resolved CLI with `upgrade` through the manager's operation queue and the shared `packages/web/server/lib/opencode/cli-upgrade.js` executor. OpenCode chooses its installer. Concurrent webviews share one installation; failures allow another attempt. The existing Reload action restarts the server afterwards. The bridge waits for command completion without its default 30-second timeout. External connections, missing CLIs, and the Windows ARM64 workaround reject upgrades before spawning. Version checks remain available for external connections.
+  - Managed runtimes run the resolved CLI with `upgrade` through the manager's operation queue and the shared `packages/web/server/lib/opencode/cli-upgrade.js` executor. The queued action resolves the CLI with the same fallback as capability reporting; it does not require a live server process just to update the binary. OpenCode chooses its installer. Concurrent webviews share one installation; failures allow another attempt. The existing Reload action restarts the server afterwards. The bridge waits for command completion without its default 30-second timeout. External connections, missing CLIs, and the Windows ARM64 workaround reject upgrades before spawning. Version checks remain available for external connections.
 
 - `bridge-permission-auto-accept-runtime.ts`
   - Owns the persisted VS Code permission auto-accept policy and its GET/PUT bridge contract.
@@ -298,6 +298,11 @@ Bridge surface (`bridge-config-runtime.ts`), matching the web routes:
   `subtask` is accepted as the v1 name for `subagent`.
 - `api:config/mcp` — `McpEntity` bodies; entries carry `sectionKey` and
   `legacy`.
+- `api:config/websearch` — `PUT /api/config/websearch`; `{ selection }` is
+  `false`, `null` (remove the key), `"random"` or a provider id, written with
+  the shared `writeWebSearchSelection` to `OPENCODE_CONFIG` or the user config.
+  `{ method: "GET", directory }` returns `{ projectPath }` from the shared
+  `findWebSearchProjectOverride`: the project config that overrides that write.
 
 ## Session archive and metadata
 

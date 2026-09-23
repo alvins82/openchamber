@@ -5,6 +5,8 @@ import { routingI18n } from './routing.i18n';
 import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
 import { fileArtifactsI18n } from './file-artifacts.i18n';
+import { usageStatsI18n } from './usage-stats.i18n';
+import { webSearchI18n } from './websearch.i18n';
 
 export const dict = {
   "opencodeCompatibility.bundled": "OpenCode, OpenChamber ile birlikte gelir. OpenCode v2 için OpenChamber’ı güncelleyin.",
@@ -56,6 +58,8 @@ export const dict = {
   ...pluginPanelI18n.tr,
   ...surfacePanelI18n.tr,
   ...fileArtifactsI18n.tr,
+  ...usageStatsI18n.tr,
+  ...webSearchI18n.tr,
   'terminalView.actions.attachSelection': 'Seçili çıktıyı ekle',
   'terminalView.actions.copySelection': 'Seçili çıktıyı kopyala',
   'terminalView.toast.selectionCopied': 'Çıktı kopyalandı',
@@ -1427,6 +1431,7 @@ export const dict = {
   'sidebarFilesTree.menu.download': 'İndir',
   'sidebarFilesTree.menu.newFile': 'Yeni Dosya',
   'sidebarFilesTree.menu.newFolder': 'Yeni Klasör',
+  'sidebarFilesTree.menu.uploadFiles': 'Dosya yükle',
   'sidebarFilesTree.menu.delete': 'Sil',
   'sidebarFilesTree.toast.pathCopied': 'Yol kopyalandı',
   'sidebarFilesTree.toast.copyFailed': 'Kopyalama başarısız',
@@ -1454,6 +1459,7 @@ export const dict = {
   'sidebarFilesTree.search.clearAria': 'Aramayı temizle',
   'sidebarFilesTree.actions.newFileTitle': 'Yeni Dosya',
   'sidebarFilesTree.actions.newFolderTitle': 'Yeni Klasör',
+  'sidebarFilesTree.actions.uploadFilesTitle': 'Dosya yükle',
   'sidebarFilesTree.actions.refreshTitle': 'Yenile',
   'sidebarFilesTree.actions.collapseAllTitle': 'Tüm klasörleri daralt',
   'sidebarFilesTree.actions.fileMenuTitle': 'Dosya menüsü',

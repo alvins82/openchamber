@@ -1,4 +1,5 @@
 import React from 'react';
+import { useSessionTurnActive } from '@/sync/global-session-status';
 import { SessionActivityIndicator } from '@/components/session/SessionActivityIndicator';
 import { createPortal } from 'react-dom';
 import {
@@ -69,7 +70,7 @@ import {
   useSessionOrderingStore,
 } from '@/sync/session-ordering';
 import { useSessionUIStore } from '@/sync/session-ui-store';
-import { useAllLiveSessions, useGlobalSessionStatus } from '@/sync/sync-context';
+import { useAllLiveSessions } from '@/sync/sync-context';
 import { useGlobalSyncStore } from '@/sync/global-sync-store';
 import { useSessionUnseenCount } from '@/sync/notification-store';
 import { useHasSessionActivityDuration } from '@/sync/session-activity-timing';
@@ -109,6 +110,7 @@ type MobileSessionsSheetProps = {
     instanceLabel: string | null;
     onOpenInstances?: () => void;
     onOpenSettings: () => void;
+    onOpenUsage: () => void;
     /** Present only while a server update is available (hosted web). */
     onOpenUpdate?: () => void;
   };
@@ -313,10 +315,8 @@ const SessionRow: React.FC<{
   const aiRename = useSessionAiRenameAction(session.id, session.directory, swipeEnabled && revealed);
   // Live indicators, same conventions as the desktop sidebar: busy/retry →
   // spinner; unseen activity on a non-active row → attention dot.
-  const liveStatus = useGlobalSessionStatus(session.id);
   const unseenCount = useSessionUnseenCount(session.id);
-  const statusType = liveStatus?.type ?? 'idle';
-  const isStreaming = statusType === 'busy' || statusType === 'retry';
+  const isStreaming = useSessionTurnActive(session.id);
   const showUnreadDot = !isStreaming && unseenCount > 0 && !active;
   const hasActivityDuration = useHasSessionActivityDuration(session.id, isStreaming);
   const showActivityDuration = (isStreaming || showUnreadDot) && hasActivityDuration;
@@ -1909,6 +1909,18 @@ export const MobileSessionsSheet: React.FC<MobileSessionsSheetProps> = ({ open, 
                   <span className="absolute right-2 top-2 inline-flex size-2 rounded-full bg-primary" aria-hidden />
                 </Button>
               ) : null}
+              <Button
+                type="button"
+                variant="default"
+                size="lg"
+                className="w-10 px-0"
+                onClick={footer.onOpenUsage}
+                aria-label={t('usageStats.openAction')}
+                title={t('usageStats.openAction')}
+                style={{ touchAction: 'manipulation' }}
+              >
+                <Icon name="bar-chart" className="size-5" />
+              </Button>
               <Button
                 type="button"
                 variant="default"

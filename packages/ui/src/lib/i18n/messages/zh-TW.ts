@@ -6,6 +6,8 @@ import { routingI18n } from './routing.i18n';
 import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
 import { fileArtifactsI18n } from './file-artifacts.i18n';
+import { usageStatsI18n } from './usage-stats.i18n';
+import { webSearchI18n } from './websearch.i18n';
 
 export const dict: Record<I18nKey, string> = {
   "opencodeCompatibility.bundled": "OpenCode 隨 OpenChamber 一起提供。請更新 OpenChamber 以取得 OpenCode v2。",
@@ -57,6 +59,8 @@ export const dict: Record<I18nKey, string> = {
   ...pluginPanelI18n['zh-TW'],
   ...surfacePanelI18n['zh-TW'],
   ...fileArtifactsI18n['zh-TW'],
+  ...usageStatsI18n['zh-TW'],
+  ...webSearchI18n['zh-TW'],
   'terminalView.actions.attachSelection': '附加所選輸出',
   'terminalView.actions.copySelection': '複製所選輸出',
   'terminalView.toast.selectionCopied': '已複製輸出',
@@ -1430,6 +1434,7 @@ export const dict: Record<I18nKey, string> = {
   'sidebarFilesTree.menu.download': '下載',
   'sidebarFilesTree.menu.newFile': '新增檔案',
   'sidebarFilesTree.menu.newFolder': '新增資料夾',
+  'sidebarFilesTree.menu.uploadFiles': '上傳檔案',
   'sidebarFilesTree.menu.delete': '刪除',
   'sidebarFilesTree.toast.pathCopied': '路徑已複製',
   'sidebarFilesTree.toast.copyFailed': '複製失敗',
@@ -1457,6 +1462,7 @@ export const dict: Record<I18nKey, string> = {
   'sidebarFilesTree.search.clearAria': '清除搜尋',
   'sidebarFilesTree.actions.newFileTitle': '新增檔案',
   'sidebarFilesTree.actions.newFolderTitle': '新增資料夾',
+  'sidebarFilesTree.actions.uploadFilesTitle': '上傳檔案',
   'sidebarFilesTree.actions.refreshTitle': '重新整理',
   'sidebarFilesTree.actions.collapseAllTitle': '摺疊所有資料夾',
   'sidebarFilesTree.state.searching': '搜尋中...',

@@ -5,6 +5,8 @@ import { routingI18n } from './routing.i18n';
 import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
 import { fileArtifactsI18n } from './file-artifacts.i18n';
+import { usageStatsI18n } from './usage-stats.i18n';
+import { webSearchI18n } from './websearch.i18n';
 
 export const dict = {
   "opencodeCompatibility.bundled": "OpenCode ist in OpenChamber enthalten. Aktualisieren Sie OpenChamber, um OpenCode v2 zu erhalten.",
@@ -56,6 +58,8 @@ export const dict = {
   ...pluginPanelI18n.de,
   ...surfacePanelI18n.de,
   ...fileArtifactsI18n.de,
+  ...usageStatsI18n.de,
+  ...webSearchI18n.de,
   'common.language.german': 'Deutsch',
   'common.loading': 'Wird geladen...',
   'common.unavailable': 'Nicht verfügbar',
@@ -1267,6 +1271,7 @@ export const dict = {
   'sidebarFilesTree.menu.download': 'Herunterladen',
   'sidebarFilesTree.menu.newFile': 'Neue Datei',
   'sidebarFilesTree.menu.newFolder': 'Neuer Ordner',
+  'sidebarFilesTree.menu.uploadFiles': 'Dateien hochladen',
   'sidebarFilesTree.menu.delete': 'Löschen',
   'sidebarFilesTree.toast.pathCopied': 'Pfad kopiert',
   'sidebarFilesTree.toast.copyFailed': 'Kopieren fehlgeschlagen',
@@ -1294,6 +1299,7 @@ export const dict = {
   'sidebarFilesTree.search.clearAria': 'Suche löschen',
   'sidebarFilesTree.actions.newFileTitle': 'Neue Datei',
   'sidebarFilesTree.actions.newFolderTitle': 'Neuer Ordner',
+  'sidebarFilesTree.actions.uploadFilesTitle': 'Dateien hochladen',
   'sidebarFilesTree.actions.refreshTitle': 'Aktualisieren',
   'sidebarFilesTree.actions.fileMenuTitle': 'Dateimenü',
   'sidebarFilesTree.state.searching': 'Suche läuft...',

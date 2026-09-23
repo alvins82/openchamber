@@ -5,6 +5,8 @@ import { routingI18n } from './routing.i18n';
 import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
 import { fileArtifactsI18n } from './file-artifacts.i18n';
+import { usageStatsI18n } from './usage-stats.i18n';
+import { webSearchI18n } from './websearch.i18n';
 
 export const dict = {
   "opencodeCompatibility.bundled": "OpenCode est inclus dans OpenChamber. Mettez OpenChamber à jour pour obtenir OpenCode v2.",
@@ -56,6 +58,8 @@ export const dict = {
   ...pluginPanelI18n.fr,
   ...surfacePanelI18n.fr,
   ...fileArtifactsI18n.fr,
+  ...usageStatsI18n.fr,
+  ...webSearchI18n.fr,
   'terminalView.actions.attachSelection': 'Joindre la sortie sélectionnée',
   'terminalView.actions.copySelection': 'Copier la sortie sélectionnée',
   'terminalView.toast.selectionCopied': 'Sortie copiée',
@@ -1213,6 +1217,7 @@ export const dict = {
   'sidebarFilesTree.menu.download': 'Télécharger',
   'sidebarFilesTree.menu.newFile': 'Nouveau fichier',
   'sidebarFilesTree.menu.newFolder': 'Nouveau dossier',
+  'sidebarFilesTree.menu.uploadFiles': 'Téléverser des fichiers',
   'sidebarFilesTree.menu.delete': 'Supprimer',
   'sidebarFilesTree.toast.pathCopied': 'Chemin copié',
   'sidebarFilesTree.toast.copyFailed': 'Échec de la copie',
@@ -1240,6 +1245,7 @@ export const dict = {
   'sidebarFilesTree.search.clearAria': 'Effacer la recherche',
   'sidebarFilesTree.actions.newFileTitle': 'Nouveau fichier',
   'sidebarFilesTree.actions.newFolderTitle': 'Nouveau dossier',
+  'sidebarFilesTree.actions.uploadFilesTitle': 'Téléverser des fichiers',
   'sidebarFilesTree.actions.refreshTitle': 'Rafraîchir',
   'sidebarFilesTree.actions.collapseAllTitle': 'Réduire tous les dossiers',
   'sidebarFilesTree.actions.fileMenuTitle': 'Menu Fichier',

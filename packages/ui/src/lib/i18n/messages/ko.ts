@@ -6,6 +6,8 @@ import { routingI18n } from './routing.i18n';
 import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
 import { fileArtifactsI18n } from './file-artifacts.i18n';
+import { usageStatsI18n } from './usage-stats.i18n';
+import { webSearchI18n } from './websearch.i18n';
 
 export const dict: Record<I18nKey, string> = {
   "opencodeCompatibility.bundled": "OpenCode는 OpenChamber에 포함되어 있습니다. OpenCode v2를 사용하려면 OpenChamber를 업데이트하세요.",
@@ -57,6 +59,8 @@ export const dict: Record<I18nKey, string> = {
   ...pluginPanelI18n.ko,
   ...surfacePanelI18n.ko,
   ...fileArtifactsI18n.ko,
+  ...usageStatsI18n.ko,
+  ...webSearchI18n.ko,
   'terminalView.actions.attachSelection': '선택한 출력 첨부',
   'terminalView.actions.copySelection': '선택한 출력 복사',
   'terminalView.toast.selectionCopied': '출력을 복사했습니다',
@@ -1454,6 +1458,7 @@ export const dict: Record<I18nKey, string> = {
   'sidebarFilesTree.menu.download': '다운로드',
   'sidebarFilesTree.menu.newFile': '새 파일',
   'sidebarFilesTree.menu.newFolder': '새 폴더',
+  'sidebarFilesTree.menu.uploadFiles': '파일 업로드',
   'sidebarFilesTree.menu.delete': '삭제',
   'sidebarFilesTree.toast.pathCopied': '경로 복사됨',
   'sidebarFilesTree.toast.copyFailed': '복사 실패',
@@ -1481,6 +1486,7 @@ export const dict: Record<I18nKey, string> = {
   'sidebarFilesTree.search.clearAria': '검색 지우기',
   'sidebarFilesTree.actions.newFileTitle': '새 파일',
   'sidebarFilesTree.actions.newFolderTitle': '새 폴더',
+  'sidebarFilesTree.actions.uploadFilesTitle': '파일 업로드',
   'sidebarFilesTree.actions.refreshTitle': '새로고침',
   'sidebarFilesTree.actions.collapseAllTitle': '모든 폴더 접기',
   'sidebarFilesTree.actions.fileMenuTitle': '파일 메뉴',

@@ -6,6 +6,8 @@ import { routingI18n } from './routing.i18n';
 import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
 import { fileArtifactsI18n } from './file-artifacts.i18n';
+import { usageStatsI18n } from './usage-stats.i18n';
+import { webSearchI18n } from './websearch.i18n';
 
 export const dict: Record<I18nKey, string> = {
   "opencodeCompatibility.bundled": "OpenCode входить до складу OpenChamber. Оновіть OpenChamber, щоб отримати OpenCode v2.",
@@ -57,6 +59,8 @@ export const dict: Record<I18nKey, string> = {
   ...pluginPanelI18n.uk,
   ...surfacePanelI18n.uk,
   ...fileArtifactsI18n.uk,
+  ...usageStatsI18n.uk,
+  ...webSearchI18n.uk,
   'terminalView.actions.attachSelection': 'Прикріпити вибраний вивід',
   'terminalView.actions.copySelection': 'Скопіювати вибраний вивід',
   'terminalView.toast.selectionCopied': 'Вивід скопійовано',
@@ -1418,6 +1422,7 @@ export const dict: Record<I18nKey, string> = {
   "sidebarFilesTree.menu.download": "Завантажити",
   "sidebarFilesTree.menu.newFile": "Новий файл",
   "sidebarFilesTree.menu.newFolder": "Нова папка",
+  "sidebarFilesTree.menu.uploadFiles": "Завантажити файли",
   "sidebarFilesTree.menu.delete": "Видалити",
   "sidebarFilesTree.toast.pathCopied": "Шлях скопійовано",
   "sidebarFilesTree.toast.copyFailed": "Помилка копіювання",
@@ -1445,6 +1450,7 @@ export const dict: Record<I18nKey, string> = {
   "sidebarFilesTree.search.clearAria": "Очистити пошук",
   "sidebarFilesTree.actions.newFileTitle": "Новий файл",
   "sidebarFilesTree.actions.newFolderTitle": "Нова папка",
+  "sidebarFilesTree.actions.uploadFilesTitle": "Завантажити файли",
   "sidebarFilesTree.actions.refreshTitle": "Оновити",
   "sidebarFilesTree.actions.collapseAllTitle": "Згорнути всі папки",
   "sidebarFilesTree.actions.fileMenuTitle": "Меню файлу",

@@ -20,6 +20,7 @@ This module provides OpenCode server integration utilities for the web server ru
 - `packages/web/server/lib/opencode/network-runtime.js`: OpenCode URL construction, health-probe readiness checks, and API prefix runtime.
 - `packages/web/server/lib/opencode/project-directory-runtime.js`: request-scoped and settings-backed project directory resolution/validation runtime.
 - `packages/web/server/lib/opencode/config-entity-routes.js`: route registration for agent/command/MCP config orchestration. OpenCode 2 watches these files, so a write is live as soon as it lands and the route answers plain success.
+- `packages/web/server/lib/opencode/websearch-config.js`: writes OpenCode's `websearch` choice (`PUT /api/config/websearch` in `routes.js`; body `{ selection: false | null | "random" | "<provider id>" }`, `null` removes the key, so OpenCode falls back to the answer given in its chat consent form, which it keeps in its own store) to `OPENCODE_CONFIG` when set, else the user config. `GET /api/config/websearch` returns `{ projectPath }`: the project config whose `websearch` overrides that write (OpenCode merges user < project < `OPENCODE_CONFIG`), so Settings disables the choice and names the file instead of letting it snap back; `findWebSearchProjectOverride` in `config-v2.js` holds the rule. The pure transform is `writeWebSearchSelection` in `config-v2.js`, shared with the VS Code bridge (`api:config/websearch`).
 - `packages/web/server/lib/opencode/config-mutation-response.js`: shared response builders for applied config mutations and external manual-restart guidance.
 - `packages/web/server/lib/opencode/snippets.js`: opencode-snippets-compatible snippet file CRUD, discovery, and hashtag expansion.
 - `packages/web/server/lib/opencode/cli-options.js`: CLI/environment option parsing for server startup arguments.
@@ -188,7 +189,7 @@ Two hard rules, both verified against v2.0.8
 ## Public exports (providers.js)
 - `getProviderSources(providerId, workingDirectory)`: Resolves which OpenCode config layers define a provider.
 - `listProviderConfigs(workingDirectory)`: Every provider a config layer defines, projected into the canonical v2 `ProviderEntity` shape, with `legacy` marking entries still stored under the v1 `provider` key.
-- `upsertProviderConfig(providerId, config, workingDirectory, scope?, options?)`: Validates and writes a custom provider block into the user/project/custom config layer. The payload may use the v2 spelling (`package`, `settings.baseURL`, `headers`) or the v1 spelling (`npm`, `options.baseURL`); what lands on disk is always a v2 `providers` entry with `package: "aisdk:<npm>"` and `settings.baseURL`. The adapter may be OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages. Existing provider, option, and retained-model fields not managed by the form are preserved; omitted models, headers, and env credentials remain explicit removals. Updating an entry still stored under the legacy `provider` key rewrites it under `providers` in the same file, dropping the fields v2 accepts but ignores; unrelated legacy siblings are untouched. Does not store API keys. Requires `config.env` or `options.hasStoredAuth` (auth already written via OpenCode `auth.set`). Edit flows must pass the provider's effective existing layer (`custom` > `project` > `user`) so updates do not create a global user override.
+- `upsertProviderConfig(providerId, config, workingDirectory, scope?, options?)`: Validates and writes a custom provider block into the user/project/custom config layer. The payload may use the v2 spelling (`package`, `settings.baseURL`, `headers`) or the v1 spelling (`npm`, `options.baseURL`); what lands on disk is always a v2 `providers` entry with `package: "aisdk:<npm>"` and `settings.baseURL`. The adapter may be OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages. Existing provider, option, and retained-model fields not managed by the form are preserved; omitted models, headers, and env credentials remain explicit removals. A model's `variants` (reasoning levels) are replaced when the payload carries the array, cleared when it carries an empty one, and kept when the key is absent. Updating an entry still stored under the legacy `provider` key rewrites it under `providers` in the same file, dropping the fields v2 accepts but ignores; unrelated legacy siblings are untouched. Does not store API keys. Requires `config.env` or `options.hasStoredAuth` (auth already written via OpenCode `auth.set`). Edit flows must pass the provider's effective existing layer (`custom` > `project` > `user`) so updates do not create a global user override.
 - `validateCustomProviderConfig(providerId, config, options?)`: Structural validation for custom provider payloads (id format, adapter allowlist `@ai-sdk/openai-compatible`/`@ai-sdk/openai`/`@ai-sdk/anthropic`, http(s) base URL, models, credentials via `env` or `hasStoredAuth`). Accepts both spellings and returns the normalized v2 value.
 - `removeProviderConfig(providerId, workingDirectory, scope?)`: Removes a provider block from the selected config layer.
 
@@ -244,13 +245,18 @@ limit, and the VS Code bridge does not apply its usual 30-second request timeout
 
 `GET /api/opencode/compatibility` reads the local CLI version without starting
 its server, or probes an external server's JSON version contract. A confirmed
-managed v1 CLI on macOS/Linux advertises `canInstall`; bundled binaries,
-external connections and Windows do not.
+managed v1 CLI on macOS, Linux or Windows (x64/arm64) advertises `canInstall`;
+bundled binaries and external connections do not.
 
 `POST /api/opencode/install-v2` rechecks that capability and shares one operation
-across concurrent clients. `v2-install.js` downloads the official
-`https://opencode.ai/v2/install` script, passes a validated stable v2 release
-from npm and `--no-modify-path`, then verifies the resulting executable.
+across concurrent clients. `v2-install.js` resolves a validated stable v2
+release from npm. On macOS/Linux it downloads the official
+`https://opencode.ai/v2/install` script and runs it with that release and
+`--no-modify-path`. That script is bash, so on Windows it downloads the npm
+platform package the script would fetch, `@opencode/cli-windows-x64-baseline`
+(arm64 too, like the desktop bundle), checks it against the `sha512` integrity
+npm publishes, and unpacks `opencode.exe` with the system `tar.exe`. Both
+paths then verify the resulting executable.
 It installs into the host user's standard `~/.opencode/bin`. Existing npm/Bun
 packages remain installed; the host selects the new binary through
 `opencodeBinary`, restarts OpenCode, and waits for v2 readiness before replying.
@@ -263,6 +269,12 @@ verification failure. If rollback fails, backups and the lock remain under
 followed by a settings/restart failure keeps v2 on disk; Check again can retry
 the restart. A host crash may also leave the lock for manual recovery.
 Installer output is discarded, not forwarded to clients or logs.
+
+## Public exports (response-envelope.js)
+- `unwrapOpenCodeResponse(body)`: strips OpenCode 2.x's response envelope. A single record (`GET /api/session/:id`, one message) arrives as `{ data }`, some routes as `{ location, data }`, pages as `{ data, cursor }`. Records and plain lists are unwrapped; pages keep the envelope for their cursor. Every server-side OpenCode read goes through it: unwrapping only on `location` left record envelopes in place, so `parentID` and message ids read as missing.
+
+## Public exports (session-activity.js)
+- `createSessionActivityProbe({ buildOpenCodeUrl, getOpenCodeAuthHeaders, timeoutMs })`: whether a session's turn really ended. A parent goes idle while a background subagent works and runs again when OpenCode hands the result back. `fetchActiveSessionStatuses()` reads `/api/session/active`, `fetchChildSessionIds(id)` pages `GET /api/session?parentID=`, `hasWorkingChildren(id, statuses)` combines them. Every read answers `null` when OpenCode could not be asked. Used by the goal loop (waits) and the notification runtime (stays silent on the pause).
 
 ## Public exports (session-runtime.js)
 - `createSessionRuntime({ writeSseEvent, getNotificationClients, broadcastEvent? })`: creates runtime-owned state machine and APIs for session status.
@@ -771,7 +783,7 @@ headers }` or v1 `{ npm, options }`. The stored entry is always a
 ## Public exports (tunnel-wiring-runtime.js)
 - `createTunnelWiringRuntime(dependencies)`: creates runtime for tunnel service construction and tunnel route registration.
 - Returned API:
-  - `initialize(app, initialPort)`
+  - `initialize(app, initialPort, hasUiPassword)`
 
 ## Public exports (startup-pipeline-runtime.js)
 - `createStartupPipelineRuntime(dependencies)`: creates runtime for terminal wiring, proxy/bootstrap scheduling, static route registration, and server startup/listen flow.
