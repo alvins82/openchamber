@@ -329,22 +329,64 @@ export function materializeSessionSnapshots(
   const currentMessages = existingMessages ?? []
   const incomingByID = new Map(nextMessages.map((message) => [message.id, message] as const))
   let reconciledCurrentMessages = currentMessages
+  let messageOrderChanged = false
   for (let index = 0; index < currentMessages.length; index += 1) {
     const existing = currentMessages[index]
     const incoming = incomingByID.get(existing.id)
     // A completion the server reports supersedes a turn this client still
     // holds open, and the local interruption mark (`interruptedTurnToolParts`)
-    // it may have put on it. Any other existing record wins over the snapshot.
+    // it may have put on it.
+    const serverCompletedOpenAssistant =
+      existing.role === "assistant"
+      && incoming?.role === "assistant"
+      && incoming.time.completed !== undefined
+      && (existing.time.completed === undefined || existing.error?.type === "aborted")
+    if (serverCompletedOpenAssistant && incoming) {
+      if (reconciledCurrentMessages === currentMessages) reconciledCurrentMessages = [...currentMessages]
+      if (Number.isFinite(incoming.time.created) && incoming.time.created !== existing.time.created) {
+        messageOrderChanged = true
+      }
+      reconciledCurrentMessages[index] = incoming
+      continue
+    }
+
+    // A runtime can correct persisted chronology while keeping the same
+    // message ID. Apply the snapshot's authoritative creation time without
+    // replacing event-owned fields on an otherwise current message.
+    if (!incoming) continue
+    const incomingCreatedAt = incoming.time.created
     if (
-      existing.role !== "assistant"
-      || incoming?.role !== "assistant"
-      || incoming.time.completed === undefined
-      || (existing.time.completed !== undefined && existing.error?.type !== "aborted")
+      !Number.isFinite(incomingCreatedAt)
+      || incomingCreatedAt === existing.time.created
     ) continue
     if (reconciledCurrentMessages === currentMessages) reconciledCurrentMessages = [...currentMessages]
-    reconciledCurrentMessages[index] = incoming
+    messageOrderChanged = true
+    if (existing.role === "assistant") {
+      const nextTime = { ...existing.time, created: incomingCreatedAt }
+      if (incoming.role === "assistant") {
+        nextTime.completed = Math.max(
+          incomingCreatedAt,
+          existing.time.completed ?? incomingCreatedAt,
+          incoming.time.completed ?? incomingCreatedAt,
+        )
+      } else if (nextTime.completed !== undefined) {
+        nextTime.completed = Math.max(incomingCreatedAt, nextTime.completed)
+      }
+      reconciledCurrentMessages[index] = { ...existing, time: nextTime }
+    } else {
+      reconciledCurrentMessages[index] = {
+        ...existing,
+        time: { ...existing.time, created: incomingCreatedAt },
+      }
+    }
   }
-  const messages = mergeMessages(reconciledCurrentMessages, nextMessages)
+  const mergedMessages = mergeMessages(reconciledCurrentMessages, nextMessages)
+  // mergeMessages preserves the existing array when every incoming ID is
+  // already present. Timestamp corrections invalidate that array's order, so
+  // restore chronology even when the snapshot adds no new messages.
+  const messages = messageOrderChanged
+    ? sortMessagesChronologically(mergedMessages)
+    : mergedMessages
   const messagesChanged = messages !== currentMessages || (existingMessages === undefined && snapshots.length === 0)
 
   let partsChanged = false
