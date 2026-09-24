@@ -1,5 +1,13 @@
 import { z } from 'zod';
-import { normalizeFilePath, toAbsoluteFilePath } from '@/lib/path-utils';
+import { getRelativeFilePath, normalizeFilePath, toAbsoluteFilePath } from '@/lib/path-utils';
+import {
+    isExplorationTool,
+    isFileChangeTool,
+    isPatchTool,
+    isShellTool,
+    isSubagentTool,
+    isWebTool,
+} from '@/lib/opencode/tools';
 import type { ChatMessageEntry } from './types';
 
 const patchTextSchema = z.string().regex(/\S/);
@@ -7,11 +15,14 @@ const patchSchema = z.union([patchTextSchema, z.object({ patch: patchTextSchema 
 const optionalText = z.string().trim().min(1).optional().catch(undefined);
 const optionalCount = z.number().int().nonnegative().optional().catch(undefined);
 const fileSchema = z.object({
+    // v2 reports `FileDiff.Info` ({ file, patch, additions, deletions, status });
+    // the other keys keep MCP and plugin tools using older naming working.
     file: optionalText,
     filePath: optionalText,
     relativePath: optionalText,
     movePath: optionalText,
     type: optionalText,
+    status: optionalText,
     patch: patchSchema.optional().catch(undefined),
     diff: patchSchema.optional().catch(undefined),
     additions: optionalCount,
@@ -25,22 +36,28 @@ const metadataSchema = z.object({
     filediff: fileSchema.optional().catch(undefined),
     patch: patchSchema.optional().catch(undefined),
     diff: patchSchema.optional().catch(undefined),
+    sessionID: optionalText,
     sessionId: optionalText,
     exit: z.number().optional().catch(undefined),
 });
 const inputSchema = z.object({
+    path: optionalText,
     filePath: optionalText,
     file_path: optionalText,
-    path: optionalText,
 });
 
-const changeTools = new Set(['edit', 'multiedit', 'write', 'apply_patch']);
-const explorationTools = new Set(['read', 'list', 'grep', 'glob', 'lsp', 'skill']);
-const webTools = new Set(['websearch', 'perplexity', 'codesearch', 'webfetch']);
-const commandTools = new Set(['bash', 'shell', 'cmd', 'terminal']);
+interface TurnFileChange {
+    /** Path relative to the message's project root, as the turn diff lists it. */
+    path: string;
+    /** Absent when a call's per-file numbers could not be recovered. */
+    additions?: number;
+    deletions?: number;
+}
 
 export interface LiveActivitySummary {
     files: number;
+    /** Files the turn's own edit/write/patch calls touched, in first-touch order. */
+    changedFiles: TurnFileChange[];
     additions: number;
     deletions: number;
     hasCompleteDiff: boolean;
@@ -84,27 +101,40 @@ function countPatch(patch: string | undefined): { additions: number; deletions: 
     return hasHunk && oldRemaining === 0 && newRemaining === 0 ? { additions, deletions } : undefined;
 }
 
+interface FileChangeRecord {
+    path: string;
+    additions: number;
+    deletions: number;
+    complete: boolean;
+}
+
 export function summarizeLiveActivity(messages: readonly ChatMessageEntry[]): LiveActivitySummary {
     const summary: LiveActivitySummary = {
-        files: 0, additions: 0, deletions: 0, hasCompleteDiff: true,
+        files: 0, changedFiles: [], additions: 0, deletions: 0, hasCompleteDiff: true,
         explored: false, commands: 0, researched: false, subagents: 0,
     };
-    const changedFiles = new Set<string>();
+    // Keyed by comparable absolute path; insertion order is first-touch order.
+    const changedFiles = new Map<string, FileChangeRecord>();
     const subagents = new Set<string>();
     const seenCalls = new Set<string>();
     for (const message of messages) {
-        const cwd = message.info.role === 'assistant' ? message.info.path?.cwd ?? '' : '';
-        const resolvePath = (path: string) => {
+        // v2 assistant messages carry no working directory, and tool inputs
+        // arrive already resolved, so paths are used as the tool reported them.
+        const cwd = '';
+        const root = '';
+        const canonicalPath = (path: string) => {
             const absolute = normalizeFilePath(cwd ? toAbsoluteFilePath(cwd, path) : path);
             if (/^[A-Za-z]:\//.test(absolute)) {
-                return toAbsoluteFilePath(absolute.slice(0, 3), absolute.slice(3)).toLowerCase();
+                return toAbsoluteFilePath(absolute.slice(0, 3), absolute.slice(3));
             }
             if (absolute.startsWith('//')) {
                 const [server, share, ...parts] = absolute.slice(2).split('/');
-                return toAbsoluteFilePath(`//${server}/${share}`, parts.join('/')).toLowerCase();
+                return toAbsoluteFilePath(`//${server}/${share}`, parts.join('/'));
             }
             return absolute.startsWith('/') ? toAbsoluteFilePath('/', absolute.slice(1)) : absolute;
         };
+        // Windows drive and UNC paths compare case-insensitively.
+        const keyOf = (canonical: string) => /^([A-Za-z]:\/|\/\/)/.test(canonical) ? canonical.toLowerCase() : canonical;
         for (const part of message.parts) {
             if (part.type !== 'tool') continue;
             const callKey = `${message.info.id}:${part.callID || part.id}`;
@@ -112,61 +142,101 @@ export function summarizeLiveActivity(messages: readonly ChatMessageEntry[]): Li
             seenCalls.add(callKey);
             const state = part.state;
             if (state.status !== 'completed' && state.status !== 'error') continue;
-            const tool = part.tool.trim().toLowerCase();
+            const tool = part.tool;
             const metadata = metadataSchema.safeParse(state.metadata).data;
-            if (commandTools.has(tool) && (state.status === 'completed' || metadata?.exit !== undefined)) {
+            if (isShellTool(tool) && (state.status === 'completed' || metadata?.exit !== undefined)) {
                 summary.commands++;
             }
             if (state.status !== 'completed') continue;
-            summary.explored ||= explorationTools.has(tool);
-            summary.researched ||= webTools.has(tool);
-            if (tool === 'task' && metadata?.sessionId) subagents.add(metadata.sessionId);
-            if (!changeTools.has(tool)) continue;
+            summary.explored ||= isExplorationTool(tool);
+            summary.researched ||= isWebTool(tool);
+            if (isSubagentTool(tool)) {
+                const childSession = metadata?.sessionID ?? metadata?.sessionId;
+                if (childSession) subagents.add(childSession);
+            }
+            if (!isFileChangeTool(tool)) continue;
 
             const input = inputSchema.safeParse(state.input).data;
             if (metadata?.files?.some((file) => file === null)) summary.hasCompleteDiff = false;
             const entries = metadata?.files?.filter((file) => file !== null);
             const files = entries?.length ? entries : [metadata?.filediff ?? {}];
-            let missingFileDiff = false;
             let callAdditions = 0;
             let callDeletions = 0;
+            const callRecords: FileChangeRecord[] = [];
+            const unstattedRecords: FileChangeRecord[] = [];
             const callPaths = new Set<string>();
             for (const file of files) {
-                const originalPath = file.filePath ?? file.file ?? file.relativePath
-                    ?? (tool !== 'apply_patch' ? input?.filePath ?? input?.file_path ?? input?.path : undefined);
+                // A `write` result carries no diff at all in v2, so its path
+                // only exists on the call's input.
+                const originalPath = file.file ?? file.filePath ?? file.relativePath
+                    ?? (isPatchTool(tool) ? undefined : input?.path ?? input?.filePath ?? input?.file_path);
                 const path = file.movePath ?? originalPath;
                 if (!path) {
                     summary.hasCompleteDiff = false;
                     continue;
                 }
-                const normalizedPath = resolvePath(path);
-                if (callPaths.has(normalizedPath)) continue;
-                callPaths.add(normalizedPath);
+                const canonical = canonicalPath(path);
+                const key = keyOf(canonical);
+                if (callPaths.has(key)) continue;
+                callPaths.add(key);
                 const stats = countPatch(file.patch ?? file.diff)
                     ?? (file.additions !== undefined && file.deletions !== undefined
                         ? { additions: file.additions, deletions: file.deletions } : undefined);
+                const isAddOrDelete = file.type === 'add' || file.type === 'delete'
+                    || file.status === 'added' || file.status === 'deleted';
                 if (stats && stats.additions === 0 && stats.deletions === 0
-                    && !file.movePath && file.type !== 'add' && file.type !== 'delete') continue;
+                    && !file.movePath && !isAddOrDelete) continue;
+                let record = changedFiles.get(key);
                 // A rename moves an existing identity rather than counting it
                 // again when the same file was edited earlier in this turn.
-                if (file.movePath && originalPath) changedFiles.delete(resolvePath(originalPath));
-                changedFiles.add(normalizedPath);
+                if (file.movePath && originalPath) {
+                    const previousKey = keyOf(canonicalPath(originalPath));
+                    const previous = previousKey === key ? undefined : changedFiles.get(previousKey);
+                    if (previous) {
+                        changedFiles.delete(previousKey);
+                        if (record) {
+                            record.additions += previous.additions;
+                            record.deletions += previous.deletions;
+                            record.complete &&= previous.complete;
+                        } else {
+                            record = previous;
+                        }
+                    }
+                }
+                if (!record) {
+                    record = { path: getRelativeFilePath(canonical, root), additions: 0, deletions: 0, complete: true };
+                } else if (file.movePath) {
+                    record.path = getRelativeFilePath(canonical, root);
+                }
+                changedFiles.set(key, record);
+                callRecords.push(record);
                 if (!stats) {
-                    missingFileDiff = true;
+                    unstattedRecords.push(record);
                 } else {
+                    record.additions += stats.additions;
+                    record.deletions += stats.deletions;
                     callAdditions += stats.additions;
                     callDeletions += stats.deletions;
                 }
             }
-            if (missingFileDiff) {
+            if (unstattedRecords.length > 0) {
                 // The top-level patch describes the entire call. Use it instead
                 // of (never in addition to) any per-file numbers already found.
                 const fallback = countPatch(metadata?.patch ?? metadata?.diff);
                 if (fallback) {
                     callAdditions = fallback.additions;
                     callDeletions = fallback.deletions;
+                    // A single-file call's whole patch is that file's patch; with
+                    // several files it cannot be split, so those files keep no numbers.
+                    if (callRecords.length === 1) {
+                        callRecords[0].additions += fallback.additions;
+                        callRecords[0].deletions += fallback.deletions;
+                    } else {
+                        for (const record of unstattedRecords) record.complete = false;
+                    }
                 } else {
                     summary.hasCompleteDiff = false;
+                    for (const record of unstattedRecords) record.complete = false;
                 }
             }
             summary.additions += callAdditions;
@@ -174,6 +244,9 @@ export function summarizeLiveActivity(messages: readonly ChatMessageEntry[]): Li
         }
     }
     summary.files = changedFiles.size;
+    summary.changedFiles = Array.from(changedFiles.values(), (record) => record.complete
+        ? { path: record.path, additions: record.additions, deletions: record.deletions }
+        : { path: record.path });
     summary.subagents = subagents.size;
     return summary;
 }
