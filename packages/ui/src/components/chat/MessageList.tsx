@@ -341,21 +341,6 @@ const TurnBlock = React.memo(({
         return firstAssistant ? [firstAssistant] : [];
     }, [chatRenderMode, streamingAssistantMessageId, turn.assistantMessages]);
 
-    const visibleAssistantMessageIdSet = React.useMemo(
-        () => new Set(visibleAssistantMessages.map((message) => message.info.id)),
-        [visibleAssistantMessages],
-    );
-
-    const timelineMessages = React.useMemo(
-        () => turn.messages.length > 0
-            ? turn.messages
-                .filter((record) => record.role !== 'user'
-                    && (record.role !== 'assistant' || visibleAssistantMessageIdSet.has(record.messageId)))
-                .map((record) => record.message)
-            : visibleAssistantMessages,
-        [turn.messages, visibleAssistantMessageIdSet, visibleAssistantMessages],
-    );
-
     const completedAssistantMessages = React.useMemo(() => {
         if (chatRenderMode !== 'sorted') {
             return turn.assistantMessages;
@@ -590,7 +575,6 @@ const TurnBlock = React.memo(({
     return (
         <TurnItem
             turn={renderableTurn}
-            timelineMessages={timelineMessages}
             stickyUserHeader={stickyUserHeader && !userMessageHidden}
             renderMessage={renderMessage}
             assistantContent={chatRenderMode === 'live' && !defaultActivityExpanded && hasLiveActivity(turn, showReasoningTraces) ? (
@@ -606,7 +590,6 @@ const TurnBlock = React.memo(({
                     />
                     <LiveTurnActivity
                         turn={renderableTurn}
-                        timelineMessages={timelineMessages}
                         hasLaterAssistant={hasLaterAssistant}
                         expanded={turnUiState.isLiveExpanded === true}
                         onToggle={handleToggleLiveActivity}
@@ -1382,9 +1365,6 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
             indexMap.set(entry.turn.userMessage.info.id, index);
             entry.turn.assistantMessages.forEach((message) => {
                 indexMap.set(message.info.id, index);
-            });
-            entry.turn.messages.forEach((message) => {
-                indexMap.set(message.messageId, index);
             });
         });
 

@@ -3,26 +3,22 @@ import React from 'react';
 import type { ChatMessageEntry } from '../lib/turns/types';
 
 interface TurnAssistantBlockProps {
-    timelineMessages?: ChatMessageEntry[];
     assistantMessages: ChatMessageEntry[];
     renderMessage: (message: ChatMessageEntry) => React.ReactNode;
 }
 
-const isVisibleTimelineMessage = (message: ChatMessageEntry): boolean => {
-    if (message.info.role !== 'assistant') {
-        return true;
-    }
-    // SAFETY: OMP may add this marker to an OpenCode v2 assistant message; only
-    // the literal boolean value is treated as an internal context snapshot.
-    return (message.info as { summary?: unknown }).summary !== true;
+const isCompactionSummaryMessage = (message: ChatMessageEntry): boolean => {
+    // SAFETY: Runtime message metadata can carry an optional boolean summary
+    // marker; only true denotes an internal context snapshot.
+    return (message.info as { summary?: boolean }).summary === true;
 };
 
-const TurnAssistantBlock: React.FC<TurnAssistantBlockProps> = ({ timelineMessages, assistantMessages, renderMessage }) => {
-    const visibleTimelineMessages = (timelineMessages ?? assistantMessages).filter(isVisibleTimelineMessage);
+const TurnAssistantBlock: React.FC<TurnAssistantBlockProps> = ({ assistantMessages, renderMessage }) => {
+    const visibleAssistantMessages = assistantMessages.filter((message) => !isCompactionSummaryMessage(message));
 
     return (
         <div className="relative z-0">
-            {visibleTimelineMessages.map((message) => renderMessage(message))}
+            {visibleAssistantMessages.map((message) => renderMessage(message))}
         </div>
     );
 };
