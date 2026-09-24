@@ -91,7 +91,7 @@ const DEFAULT_OPTIONS: ProjectTurnRecordsOptions = {
     mergeHiddenUserTurns: false,
 };
 
-const areSameMessageRefs = (left: ChatMessageEntry[], right: ChatMessageEntry[]): boolean => {
+const areSameTurnMessages = (left: TurnMessageRecord[], right: TurnMessageRecord[]): boolean => {
     if (left === right) {
         return true;
     }
@@ -100,7 +100,14 @@ const areSameMessageRefs = (left: ChatMessageEntry[], right: ChatMessageEntry[])
     }
 
     for (let index = 0; index < left.length; index += 1) {
-        if (left[index] !== right[index]) {
+        const previous = left[index];
+        const next = right[index];
+        if (
+            previous.messageId !== next.messageId
+            || previous.role !== next.role
+            || previous.order !== next.order
+            || previous.message !== next.message
+        ) {
             return false;
         }
     }
@@ -111,7 +118,7 @@ const areSameMessageRefs = (left: ChatMessageEntry[], right: ChatMessageEntry[])
 const canReusePreviousTurn = (previous: TurnRecord, next: TurnRecord): boolean => {
     return previous.userMessage === next.userMessage
         && previous.headerMessageId === next.headerMessageId
-        && areSameMessageRefs(previous.assistantMessages, next.assistantMessages);
+        && areSameTurnMessages(previous.messages, next.messages);
 };
 
 const hydrateTurnRecord = (
@@ -213,6 +220,10 @@ export const projectTurnRecords = (
             return;
         }
         if (role !== 'user') {
+            if (currentTurn && (role === 'compaction' || role === 'shell')) {
+                currentTurn.messages.push(createTurnMessageRecord(message, index));
+                groupedMessageIds.add(message.info.id);
+            }
             return;
         }
 

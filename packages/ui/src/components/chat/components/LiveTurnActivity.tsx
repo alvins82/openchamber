@@ -10,17 +10,50 @@ import { LiveFinalActivityContext } from './liveActivityContext';
 
 interface LiveTurnActivityProps {
     turn: TurnRecord;
+    timelineMessages?: ChatMessageEntry[];
     hasLaterAssistant: boolean;
     expanded: boolean;
     onToggle: () => void;
     renderMessage: (message: ChatMessageEntry) => React.ReactNode;
 }
 
-export function LiveTurnActivity({ turn, hasLaterAssistant, expanded, onToggle, renderMessage }: LiveTurnActivityProps) {
+const isCompactionSummaryMessage = (message: ChatMessageEntry): boolean => {
+    // SAFETY: OMP may add this marker to an OpenCode v2 assistant message; only
+    // the literal boolean value is treated as an internal context snapshot.
+    return message.info.role === 'assistant'
+        && (message.info as { summary?: unknown }).summary === true;
+};
+
+export function LiveTurnActivity({ turn, timelineMessages, hasLaterAssistant, expanded, onToggle, renderMessage }: LiveTurnActivityProps) {
     const { t } = useI18n();
     const contentId = React.useId();
     const finalContentId = React.useId();
-    const finalMessage = getLiveFinalMessage(turn.assistantMessages);
+    // Compaction summaries are internal context snapshots. OMP stores them as
+    // completed assistant messages in the same parent turn, but they are not
+    // model output to replay in the live activity timeline.
+    const liveAssistantMessages = React.useMemo(
+        () => turn.assistantMessages.filter((message) => !isCompactionSummaryMessage(message)),
+        [turn.assistantMessages],
+    );
+    const visibleTimelineMessages = React.useMemo(() => {
+        const source = timelineMessages
+            ?? (turn.messages.length > 0
+                ? turn.messages
+                    .filter((record) => record.role !== 'user')
+                    .map((record) => record.message)
+                : turn.assistantMessages);
+        return source.filter((message) => !isCompactionSummaryMessage(message));
+    }, [timelineMessages, turn.assistantMessages, turn.messages]);
+    const finalMessage = getLiveFinalMessage(liveAssistantMessages);
+    const finalMessageIndex = finalMessage
+        ? visibleTimelineMessages.findIndex((message) => message.info.id === finalMessage.info.id)
+        : -1;
+    const messagesBeforeFinal = finalMessageIndex >= 0
+        ? visibleTimelineMessages.slice(0, finalMessageIndex)
+        : visibleTimelineMessages;
+    const messagesAfterFinal = finalMessageIndex >= 0
+        ? visibleTimelineMessages.slice(finalMessageIndex + 1)
+        : [];
     const settled = Boolean(finalMessage) || hasLaterAssistant;
     const isExpanded = !settled || expanded;
     const previouslySettled = React.useRef(settled);
@@ -31,8 +64,8 @@ export function LiveTurnActivity({ turn, hasLaterAssistant, expanded, onToggle, 
     } : null, [finalMessage, isExpanded, finalContentId, animateFinalCollapse]);
     // No diff parsing at token frequency. The report is only shown once the
     // turn settles; later authoritative tool metadata can refine it.
-    const summary = React.useMemo(() => settled ? summarizeLiveActivity(turn.assistantMessages) : null,
-        [settled, turn.assistantMessages]);
+    const summary = React.useMemo(() => settled ? summarizeLiveActivity(liveAssistantMessages) : null,
+        [settled, liveAssistantMessages]);
     const fileLabel = summary && summary.files > 0
         ? t(summary.files === 1 ? 'chat.liveActivity.changedFile' : 'chat.liveActivity.changedFiles', { count: summary.files })
         : null;
@@ -76,11 +109,21 @@ export function LiveTurnActivity({ turn, hasLaterAssistant, expanded, onToggle, 
                 </div>
             ) : null}
             <LiveActivityCollapse expanded={isExpanded} id={contentId}>
-                {turn.assistantMessages.map((message) => message === finalMessage ? null : renderMessage(message))}
+                {isExpanded
+                    ? messagesBeforeFinal.map((message) => renderMessage(message))
+                    : messagesBeforeFinal
+                        .filter((message) => message.info.role === 'assistant')
+                        .map((message) => renderMessage(message))}
             </LiveActivityCollapse>
+            {!isExpanded
+                ? messagesBeforeFinal
+                    .filter((message) => message.info.role !== 'assistant')
+                    .map((message) => renderMessage(message))
+                : null}
             <LiveFinalActivityContext.Provider value={finalContext}>
                 {finalMessage ? renderMessage(finalMessage) : null}
             </LiveFinalActivityContext.Provider>
+            {messagesAfterFinal.map((message) => renderMessage(message))}
         </div>
     );
 }

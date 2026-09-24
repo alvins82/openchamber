@@ -5,6 +5,7 @@ import TurnAssistantBlock from './TurnAssistantBlock';
 
 interface TurnItemProps {
     turn: Turn;
+    timelineMessages?: ChatMessageEntry[];
     stickyUserHeader?: boolean;
     renderMessage: (message: ChatMessageEntry) => React.ReactNode;
     assistantContent?: React.ReactNode;
@@ -24,7 +25,7 @@ const STICKY_HEADER_BACKGROUND: React.CSSProperties = {
         'linear-gradient(to bottom, var(--surface-background) calc(100% - 0.75rem), transparent)',
 };
 
-const TurnItem: React.FC<TurnItemProps> = ({ turn, stickyUserHeader = true, renderMessage, assistantContent }) => {
+const TurnItem: React.FC<TurnItemProps> = ({ turn, timelineMessages, stickyUserHeader = true, renderMessage, assistantContent }) => {
     return (
         <section
             className="relative w-full"
@@ -45,7 +46,13 @@ const TurnItem: React.FC<TurnItemProps> = ({ turn, stickyUserHeader = true, rend
                 renderMessage(turn.userMessage)
             )}
 
-            {assistantContent ?? <TurnAssistantBlock assistantMessages={turn.assistantMessages} renderMessage={renderMessage} />}
+            {assistantContent ?? (
+                <TurnAssistantBlock
+                    timelineMessages={timelineMessages}
+                    assistantMessages={turn.assistantMessages}
+                    renderMessage={renderMessage}
+                />
+            )}
         </section>
     );
 };

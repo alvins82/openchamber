@@ -3,7 +3,7 @@ import { Icon } from '@/components/icon/Icon';
 import { useI18n } from '@/lib/i18n';
 import { getLastConversationMessage, type Message, type Part, type Session } from '@/lib/opencode/model';
 import { useLatestSessionError } from '@/sync/notification-store';
-import { useDirectoryStore, useSessionStatus } from '@/sync/sync-context';
+import { useDirectoryStore, useSessionStatus, useSessionStatusSnapshotReady } from '@/sync/sync-context';
 import { readLastMessageState, type LastMessageState } from './sessionErrorNoticeState';
 
 interface SessionErrorNoticeProps {
@@ -121,10 +121,14 @@ export const SessionErrorNotice: React.FC<SessionErrorNoticeProps> = ({ sessionI
   const { t } = useI18n();
   const latestError = useLatestSessionError(sessionId);
   const status = useSessionStatus(sessionId, directory);
+  const statusSnapshotReady = useSessionStatusSnapshotReady(directory);
   const lastMessage = useLastMessageState(sessionId, directory);
   const storedFailure = useStoredFailure(sessionId, directory);
 
-  const isIdle = !status || status.type === 'idle';
+  // An omitted session means idle only after a successful snapshot. Until
+  // then, a reload may have hydrated an old user message while activity is
+  // still being recovered from the runtime.
+  const isIdle = status?.type === 'idle' || (status === undefined && statusSnapshotReady);
   const reportedError = latestError && isIdle
     && (!lastMessage || latestError.time >= lastMessage.timestamp)
     && !(lastMessage?.role === 'assistant' && lastMessage.hasError)
