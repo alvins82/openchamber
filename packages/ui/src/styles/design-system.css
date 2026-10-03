@@ -1,6 +1,7 @@
 @layer base {
   :root {
     color-scheme: light;
+    -webkit-font-smoothing: antialiased;
     --oc-safe-area-top: 0px;
     --oc-safe-area-right: 0px;
     --oc-safe-area-bottom: 0px;
@@ -27,7 +28,7 @@
     --text-markdown: 0.875rem;
     --text-code: 0.75rem;
     --text-ui-header: 0.875rem;
-    --text-ui-label: 0.8125rem;
+    --text-ui-label: 0.84375rem;
     --text-meta: 0.8125rem;
     --text-micro: 0.8125rem;
     --text-settings-page-title: 1.0625rem;
@@ -200,7 +201,7 @@
      depth stays readable without extra indentation. */
   .markdown-content ul,
   .markdown-content ol {
-    padding-left: 1.25rem !important;
+    padding-inline: 0 !important;
   }
 
   .markdown-content ul {
@@ -230,6 +231,7 @@
 
   .markdown-content li {
     display: list-item !important;
+    margin-inline-start: 1.25rem;
   }
 
   .markdown-content li::marker {
@@ -250,7 +252,8 @@
   }
 
   .markdown-content li > input[type="checkbox"]:first-child {
-    margin: 0 0.35em 0.15em -1.25rem;
+    margin-block: 0 0.15em;
+    margin-inline: -1.25rem 0.35em;
     vertical-align: middle;
   }
 
@@ -353,6 +356,22 @@
     0 6px 6px -3px rgb(0 0 0 / 0.16);
 }
 
+/* A modal window (dialogs, the command palette, Settings) lifts off the
+   dimmed page: a wide soft shadow plus a tighter one under the edge. */
+.oc-modal-shadow {
+  box-shadow:
+    0 2px 6px -1px rgb(0 0 0 / 0.08),
+    0 12px 28px -6px rgb(0 0 0 / 0.16),
+    0 32px 72px -12px rgb(0 0 0 / 0.24);
+}
+
+.dark .oc-modal-shadow {
+  box-shadow:
+    0 2px 6px -1px rgb(0 0 0 / 0.3),
+    0 12px 28px -6px rgb(0 0 0 / 0.45),
+    0 32px 72px -12px rgb(0 0 0 / 0.6);
+}
+
 /* Voice overlay. Glass inside glass is not glass: a nested backdrop-filter
    blurs the parent's own content (placeholder, footer icons), not the
    transcript, so that content read through the overlay. While the overlay is
@@ -360,7 +379,8 @@
    surface remains. Desktop: the overlay is mounted inside the glass box, so
    every box descendant off the overlay's ancestor chain hides and the box
    stays the glass. Mobile: the overlay is mounted beside the pill/box in
-   [data-dictation-host], so those siblings hide and the overlay is the glass. */
+   [data-dictation-host], so those siblings hide and the overlay's inner
+   [data-dictation-glass] layer is the glass. */
 .oc-glass-composer:has(.oc-dictation-overlay)
   *:not(.oc-dictation-overlay, .oc-dictation-overlay *, :has(.oc-dictation-overlay)),
 [data-dictation-host]:has(> .oc-dictation-overlay) > :not(.oc-dictation-overlay) {
@@ -568,7 +588,7 @@
   --markdown-heading4-size: var(--text-markdown);
   --markdown-heading5-size: var(--text-markdown);
   --markdown-heading6-size: var(--text-markdown);
-  --font-sans: "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --font-heading: var(--font-sans);
   --font-mono: ui-monospace, "SFMono-Regular", "Menlo", "Cascadia Mono", "Segoe UI Mono", monospace;
   --font-family-sans: var(--font-sans);

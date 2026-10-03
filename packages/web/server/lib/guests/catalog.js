@@ -1,11 +1,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-import { hasGuestPage, requestedGuestCapabilities, resolveAttachEntry, resolveAttachMode, resolvePageEntry, toPublicService, toPublicIntegration, hostMeetsOpenChamberEngine, openChamberEngineMinimum } from '@openchamber/sdk';
+import { hasGuestPage, requestedGuestCapabilities, resolveAttachEntry, resolveAttachMode, resolvePageEntry, resolveStatusSectionEntry, toPublicService, toPublicIntegration, hostMeetsOpenChamberEngine, openChamberEngineMinimum } from '@openchamber/sdk';
 import { parseManifestJson } from '@openchamber/sdk/schemas';
 
 import { listRelativeGuestScriptHrefs, resolveGuestHtmlRelativePath } from './html-tokens.js';
 import { effectiveGrants, guestGrantScope } from './grant-scope.js';
+import { enterpriseBlockedCapabilities } from './enterprise.js';
+import { readEnterprisePolicy } from '../enterprise-mode.js';
 import { onExtensionStoreWrite, readExtensionStore } from './persist.js';
 import { buildPublicSocketBindings } from './sockets.js';
 import { isReservedBuiltInId, readBuiltInRegistry } from './builtins.js';
@@ -74,27 +76,26 @@ export const guestAssetContentType = (filePath) => {
   return MIME_BY_EXT[path.extname(filePath).toLowerCase()] ?? null;
 };
 
-/** What an iframe loads: the document and its scripts. A page-less guest has neither. */
+/** Documents and scripts are served only to extensions with an execution entry. */
 const isGuestFrameContentType = (contentType) => (
   contentType.startsWith('text/html') || contentType.startsWith('text/javascript')
 );
 
 /**
  * A `.js` URL can be served from a sibling `.ts` that the host compiles.
- * `hasPage` is whether the guest declared `panel.entry`; without one only
- * assets (its SVG icons) are served, never HTML or JS, so nothing of a
- * page-less package can end up mounted in a frame.
+ * `hasRuntime` means the guest declared panel.entry or background.entry.
+ * Tools-only packages can serve assets, never HTML or JS.
  */
-export const resolveGuestServedFile = async (packageRoot, relativePath, { hasPage = true } = {}) => {
+export const resolveGuestServedFile = async (packageRoot, relativePath, { hasRuntime = true } = {}) => {
   const filePath = await resolveGuestAssetPath(packageRoot, relativePath);
   const contentType = filePath ? guestAssetContentType(filePath) : null;
-  if (contentType && !hasPage && isGuestFrameContentType(contentType)) {
+  if (contentType && !hasRuntime && isGuestFrameContentType(contentType)) {
     return null;
   }
   if (filePath && contentType) {
     return { filePath, contentType };
   }
-  if (!hasPage || !relativePath.endsWith('.js')) {
+  if (!hasRuntime || !relativePath.endsWith('.js')) {
     return null;
   }
   const tsPath = await resolveGuestAssetPath(packageRoot, `${relativePath.slice(0, -3)}.ts`);
@@ -173,8 +174,7 @@ export const inspectGuestPackage = async (packageRoot, { openchamberVersion, ski
     }
   }
   const panel = parsed.manifest.contributes.panel;
-  // A page-less package (tools only) has no HTML to check; parse already
-  // refused every contribution that would need a frame.
+  // The visible panel and background runtime are optional independent entries.
   if (hasGuestPage(parsed.manifest.contributes)) {
     const entryPath = await resolveGuestAssetPath(packageRoot, panel.entry);
     if (!entryPath) {
@@ -198,6 +198,22 @@ export const inspectGuestPackage = async (packageRoot, { openchamberVersion, ski
   };
   if (panel.entry) {
     guest.entry = panel.entry;
+  }
+  if (panel.dock !== undefined) {
+    guest.entryDock = panel.dock;
+  }
+  if (panel.size !== undefined) {
+    guest.entrySize = panel.size;
+  }
+  const backgroundEntry = parsed.manifest.contributes.background?.entry;
+  if (backgroundEntry) {
+    if (!await resolveGuestAssetPath(packageRoot, backgroundEntry)) {
+      return { ok: false, code: 'invalid-manifest' };
+    }
+    if (!await guestBuiltScriptsReady(packageRoot, backgroundEntry)) {
+      return { ok: false, code: 'missing-build' };
+    }
+    guest.backgroundEntry = backgroundEntry;
   }
   if (parsed.version) {
     guest.version = parsed.version;
@@ -233,6 +249,34 @@ export const inspectGuestPackage = async (packageRoot, { openchamberVersion, ski
     const page = parsed.manifest.contributes.page;
     if (page !== true && page?.title) guest.pageTitle = page.title;
   }
+  // The Work Status section is checked like any other entry, and may be the
+  // package's only frame.
+  const statusEntry = resolveStatusSectionEntry(parsed.manifest.contributes);
+  if (statusEntry) {
+    if (!await resolveGuestAssetPath(packageRoot, statusEntry)) {
+      return { ok: false, code: 'invalid-manifest' };
+    }
+    if (!await guestBuiltScriptsReady(packageRoot, statusEntry)) {
+      return { ok: false, code: 'missing-build' };
+    }
+    guest.statusEntry = statusEntry;
+    const section = parsed.manifest.contributes.statusSection;
+    if (section !== true && section?.title) guest.statusTitle = section.title;
+    if (section !== true && section?.height !== undefined) guest.statusHeight = section.height;
+  }
+  // File editors are frames of their own too; each entry is checked the same way.
+  const fileEditors = parsed.manifest.contributes.fileEditors ?? [];
+  for (const editor of fileEditors) {
+    if (!await resolveGuestAssetPath(packageRoot, editor.entry)) {
+      return { ok: false, code: 'invalid-manifest' };
+    }
+    if (!await guestBuiltScriptsReady(packageRoot, editor.entry)) {
+      return { ok: false, code: 'missing-build' };
+    }
+  }
+  if (fileEditors.length > 0) {
+    guest.fileEditors = fileEditors.map((editor) => ({ ...editor, match: [...editor.match] }));
+  }
   if (parsed.manifest.contributes.capabilities?.length) {
     guest.capabilities = [...parsed.manifest.contributes.capabilities];
   }
@@ -241,6 +285,9 @@ export const inspectGuestPackage = async (packageRoot, { openchamberVersion, ski
   }
   if (parsed.manifest.contributes.filesystem?.length) {
     guest.filesystem = [...parsed.manifest.contributes.filesystem];
+  }
+  if (parsed.manifest.contributes.origins?.length) {
+    guest.origins = [...parsed.manifest.contributes.origins];
   }
   if (parsed.manifest.contributes.actions?.length) {
     guest.actions = parsed.manifest.contributes.actions.map((action) => ({ ...action }));
@@ -272,6 +319,11 @@ const withSource = (guest, source, displayPath) => ({
   path: displayPath,
 });
 
+/** Whether the package has any page the host loads: panel, background, status section, or file editor. */
+export const hasGuestFrame = (guest) => Boolean(
+  guest.entry || guest.backgroundEntry || guest.statusEntry || (Array.isArray(guest.fileEditors) && guest.fileEditors.length > 0),
+);
+
 /** Catalog JSON. Drops packageRoot. Keeps attach only when true. `entry` is absent for a page-less guest. */
 export const toPublicGuest = (guest) => {
   const row = {
@@ -282,8 +334,20 @@ export const toPublicGuest = (guest) => {
     path: guest.path ?? null,
     enabled: guest.enabled !== false,
   };
+  if (guest.enterpriseBlocked?.length) {
+    row.enterpriseBlocked = [...guest.enterpriseBlocked];
+  }
   if (guest.entry) {
     row.entry = guest.entry;
+  }
+  if (guest.entryDock) {
+    row.entryDock = guest.entryDock;
+  }
+  if (typeof guest.entrySize === 'number') {
+    row.entrySize = guest.entrySize;
+  }
+  if (guest.backgroundEntry) {
+    row.backgroundEntry = guest.backgroundEntry;
   }
   if (typeof guest.version === 'string' && guest.version) {
     row.version = guest.version;
@@ -301,6 +365,9 @@ export const toPublicGuest = (guest) => {
   const attach = resolveAttachMode(guest.attach);
   if (guest.pageEntry) row.pageEntry = guest.pageEntry;
   if (guest.pageTitle) row.pageTitle = guest.pageTitle;
+  if (guest.statusEntry) row.statusEntry = guest.statusEntry;
+  if (guest.statusTitle) row.statusTitle = guest.statusTitle;
+  if (Number.isInteger(guest.statusHeight)) row.statusHeight = guest.statusHeight;
   if (attach) {
     row.attach = attach;
   }
@@ -313,6 +380,10 @@ export const toPublicGuest = (guest) => {
   if (Array.isArray(guest.filesystem) && guest.filesystem.length > 0) {
     row.filesystem = [...guest.filesystem];
   }
+  // Shown on the approval card: the frame may exchange data with these.
+  if (Array.isArray(guest.origins) && guest.origins.length > 0) {
+    row.origins = [...guest.origins];
+  }
   // Actions, commands, and tools are the parsed manifest entries as they
   // are: the UI decides which ones to apply from the grant and the enabled flag.
   if (Array.isArray(guest.actions) && guest.actions.length > 0) {
@@ -320,6 +391,9 @@ export const toPublicGuest = (guest) => {
   }
   if (Array.isArray(guest.commands) && guest.commands.length > 0) {
     row.commands = guest.commands.map((command) => ({ ...command }));
+  }
+  if (Array.isArray(guest.fileEditors) && guest.fileEditors.length > 0) {
+    row.fileEditors = guest.fileEditors.map((editor) => ({ ...editor, match: [...editor.match] }));
   }
   if (Array.isArray(guest.tools) && guest.tools.length > 0) {
     row.tools = guest.tools.map((tool) => ({ ...tool }));
@@ -372,17 +446,38 @@ export const invalidateGuestCatalog = (persistPath) => {
 };
 onExtensionStoreWrite(invalidateGuestCatalog);
 
+/**
+ * Enterprise mode, applied on every read after the cache so a policy change
+ * counts at once: a package whose gated capabilities the policy refuses keeps
+ * none of them, and `enterpriseBlocked` names them for Settings. Every route
+ * and proxy takes grants from this row, so none of them can use the refused
+ * capabilities.
+ */
+const withEnterprisePolicy = (guests) => {
+  const policy = readEnterprisePolicy();
+  if (!policy.enterpriseMode) return guests;
+  return guests.map((guest) => {
+    const blocked = enterpriseBlockedCapabilities(guest, { source: guest.source, gitUrl: guest.gitOrigin?.url }, policy);
+    if (blocked.length === 0) return guest;
+    return {
+      ...guest,
+      capabilityGrants: guest.capabilityGrants.filter((capability) => !blocked.includes(capability)),
+      enterpriseBlocked: blocked,
+    };
+  });
+};
+
 export const listInstalledGuests = async ({ persistPath } = {}) => {
   const cached = persistPath ? catalogCache.get(persistPath) : undefined;
   if (cached && cached.expiresAt > Date.now()) {
-    return cached.guests;
+    return withEnterprisePolicy(cached.guests);
   }
   const version = persistPath ? catalogVersionOf(persistPath) : 0;
   const guests = await listInstalledGuestsUncached({ persistPath });
   if (persistPath && catalogVersionOf(persistPath) === version) {
     catalogCache.set(persistPath, { guests, expiresAt: Date.now() + CATALOG_CACHE_TTL_MS });
   }
-  return guests;
+  return withEnterprisePolicy(guests);
 };
 
 const listInstalledGuestsUncached = async ({ persistPath } = {}) => {

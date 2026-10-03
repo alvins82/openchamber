@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,7 +15,7 @@ test('concurrent callers await one complete environment and later calls reuse it
     execute: (file, args, options) => {
       calls++;
       assert.equal(file, '/bin/zsh');
-      assert.deepEqual(args, ['-il', '-c', 'env -0']);
+      assert.deepEqual(args, ['-il', '-c', 'echo __OPENCHAMBER_ENV__; env -0']);
       assert.equal(options.timeout, 5000);
       assert.equal(options.windowsHide, true);
       return new Promise(resolve => { complete = resolve; });
@@ -29,6 +30,33 @@ test('concurrent callers await one complete environment and later calls reuse it
   assert.equal(await second, result);
   assert.equal(await load(), result);
   assert.equal(calls, 1);
+});
+
+// Stands in for a shell whose interactive rc file prints a banner to stdout
+// before it runs the probe command: only the `echo` part of the command and
+// `env -0` are emulated.
+const shellWithBanner = (banner, environment) => async (_file, args) => {
+  const command = args[2];
+  const echoed = command.match(/^echo (\S+); /);
+  return { stdout: Buffer.from(banner + (echoed ? `${echoed[1]}\n` : '') + environment) };
+};
+
+test('keeps shell startup output out of the environment', async () => {
+  const load = createShellEnvironmentLoader({
+    platform: 'darwin',
+    env: { SHELL: '/bin/zsh' },
+    execute: shellWithBanner('Welcome to test-host\n', 'HOME=/home/test-user\0PATH=/shell/bin\0'),
+  });
+  assert.deepEqual(await load(), { HOME: '/home/test-user', PATH: '/shell/bin' });
+});
+
+test('keeps startup output that has no trailing newline out of the environment', async () => {
+  const load = createShellEnvironmentLoader({
+    platform: 'linux',
+    env: { SHELL: '/bin/bash' },
+    execute: shellWithBanner('mode=banner', 'HOME=/home/test-user\0'),
+  });
+  assert.deepEqual(await load(), { HOME: '/home/test-user' });
 });
 
 for (const failure of ['error', 'empty']) {
@@ -97,6 +125,16 @@ const withShell = async (t, script) => {
   return shell;
 };
 
+// macOS validates a freshly written executable on its first exec, which costs
+// hundreds of milliseconds. A probe deadline in that range then expires on
+// process startup instead of on the behavior under test, so run a cheap branch
+// of the script once to pay the validation before the probe is timed.
+const warmExec = (shell, args) => new Promise(resolve => {
+  // Best effort: a warm-up that cannot spawn must not take the file down with
+  // an unhandled error, because the probe below still reports the failure.
+  spawn(shell, args, { stdio: 'ignore' }).once('close', resolve).once('error', resolve);
+});
+
 test('real slow shell leaves the event loop responsive and stdin closed', { skip: process.platform === 'win32' }, async t => {
   const shell = await withShell(t, 'read ignored && exit 1\n/bin/sleep 0.2\nprintf "READY=yes\\0"\n');
   const load = createShellEnvironmentLoader({ env: { SHELL: shell } });
@@ -108,9 +146,13 @@ test('real slow shell leaves the event loop responsive and stdin closed', { skip
 });
 
 test('real probe timeout kills the attempt and falls back', { skip: process.platform === 'win32' }, async t => {
-  const shell = await withShell(t, 'if [ "$1" = "-il" ]; then exec /bin/sleep 10; fi\nprintf "FALLBACK=yes\\0"\n');
+  const shell = await withShell(t, 'if [ "$1" = "-il" ]; then printf "%s" "$$" > "$0.pid"; exec /bin/sleep 10; fi\nprintf "FALLBACK=yes\\0"\n');
+  await warmExec(shell, ['-l', '-c', 'env -0']);
   const load = createShellEnvironmentLoader({ env: { SHELL: shell }, timeoutMs: 100 });
   assert.deepEqual(await load(), { FALLBACK: 'yes' });
+  const pid = Number(await readFile(shell + '.pid', 'utf8').catch(() => ''));
+  assert.ok(pid, 'the timed-out probe must have started');
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
 });
 
 test('real probe failure falls back without accepting partial output', { skip: process.platform === 'win32' }, async t => {

@@ -17,6 +17,20 @@ import {
   parseHostMessage,
 } from './protocol.ts';
 
+test('background action messages round-trip and reject invalid payloads', () => {
+  const action = { channel: OPENCHAMBER_SDK_CHANNEL, v: 1, type: 'action', id: 'a1', payload: {
+    kind: 'message', action: 'count', sessionId: 's1', sessionTitle: 'Session', directory: null, messageId: 'm1', role: 'assistant', text: 'Hello',
+  } };
+  expect(hostMessageSchema.parse(action)).toEqual(action);
+  expect(readHostMessage(action)).toEqual(action);
+  expect(hostMessageSchema.safeParse({ ...action, payload: { ...action.payload, kind: 'issue' } }).success).toBe(false);
+  const reply = { channel: OPENCHAMBER_SDK_CHANNEL, v: 1, type: 'action-result', id: 'a1', payload: { ok: true } };
+  expect(guestMessageSchema.parse(reply)).toEqual(reply);
+  expect(guestMessageSchema.safeParse({ ...reply, payload: { ok: false } }).success).toBe(false);
+  expect(guestMessageSchema.safeParse({ ...reply, payload: { ok: false, error: ' ' } }).success).toBe(false);
+  expect(guestMessageSchema.safeParse({ ...reply, payload: { ok: false, error: 'x'.repeat(501) } }).success).toBe(false);
+});
+
 const readyPayload = {
   theme: {
     mode: 'dark',
@@ -441,6 +455,20 @@ describe('parseGuestMessage', () => {
     expect(message).toMatchObject({ type: 'toast', id: 'oc-1' });
   });
 
+  test('toast buttons round-trip and copy text is bounded without trimming it', () => {
+    const envelope = { channel: OPENCHAMBER_SDK_CHANNEL, v: 1, type: 'toast', id: 'toast-buttons' };
+    for (const copy of [true, false, { text: '  source\n' }, { text: 'x'.repeat(32_000) }]) {
+      const payload = { kind: 'info', message: 'Summary', copy, dismiss: true, persistent: true };
+      expect(guestMessageSchema.parse({ ...envelope, payload })).toEqual({ ...envelope, payload });
+    }
+    for (const copy of ['', 'text', { text: '' }, { text: 'x'.repeat(32_001) }, { text: 42 }, { callback: 'copy' }]) {
+      expect(guestMessageSchema.safeParse({ ...envelope, payload: { kind: 'info', message: 'Summary', copy } }).success).toBe(false);
+    }
+    for (const option of [{ persistent: 'yes' }, { dismiss: 'yes' }]) {
+      expect(guestMessageSchema.safeParse({ ...envelope, payload: { kind: 'info', message: 'Summary', ...option } }).success).toBe(false);
+    }
+  });
+
   test('drops toast with an empty message', () => {
     expect(guestMessageSchema.safeParse({
       channel: OPENCHAMBER_SDK_CHANNEL,
@@ -827,6 +855,20 @@ describe('actions, commands, and badge wire shapes', () => {
     expect(parseGuestMessage({ ...envelope, type: 'resolve-result', id: 'r-1', payload: { error: 'nope' } }))
       .toMatchObject({ payload: { error: 'nope' } });
     expect(parseGuestMessage({ ...envelope, type: 'resolve-result', id: 'r-1', payload: { error: '' } })).toBeNull();
+  });
+
+  test('accepts open-commit only with a hex commit id', () => {
+    expect(parseGuestMessage({ ...envelope, type: 'open-commit', id: 'c-1', payload: { sha: 'abc1234' } })).toMatchObject({ payload: { sha: 'abc1234' } });
+    for (const sha of ['abc12', 'HEAD', '--output=x', 'abc1234 ', 'g'.repeat(40), 'a'.repeat(65)]) {
+      expect(parseGuestMessage({ ...envelope, type: 'open-commit', id: 'c-1', payload: { sha } })).toBeNull();
+    }
+  });
+
+  test('accepts resize heights in range and drops the rest', () => {
+    expect(parseGuestMessage({ ...envelope, type: 'resize', id: 'h-1', payload: { height: 180 } })).toMatchObject({ payload: { height: 180 } });
+    expect(parseGuestMessage({ ...envelope, type: 'resize', id: 'h-1', payload: { height: -1 } })).toBeNull();
+    expect(parseGuestMessage({ ...envelope, type: 'resize', id: 'h-1', payload: { height: 10_001 } })).toBeNull();
+    expect(parseGuestMessage({ ...envelope, type: 'resize', id: 'h-1', payload: { height: 1.5 } })).toBeNull();
   });
 
   test('accepts badge counts in range and drops the rest', () => {

@@ -5,6 +5,7 @@ import {
   findFirstVisibleSessionSidebarRowIndex,
   getInitialSessionSidebarRowIndexes,
   mergeSessionSidebarVirtualIndexes,
+  sectionSpacingAfter,
 } from './sessionSidebarVirtualization';
 
 type Props = {
@@ -59,7 +60,7 @@ export function SessionSidebarRows({
     return <div data-sidebar-virtual-pending="true">
       {indexes.map((index) => {
         const row = rows[index];
-        return row ? <div key={row.key}>{renderRow(row, index)}</div> : null;
+        return row ? <div key={row.key} className={sectionSpacingAfter(row, rows[index + 1])}>{renderRow(row, index)}</div> : null;
       })}
       {estimatedTotal > renderedHeight ? <div aria-hidden="true" style={{ height: estimatedTotal - renderedHeight }} /> : null}
     </div>;
@@ -71,6 +72,8 @@ export function SessionSidebarRows({
       if (!row) return null;
       return <div
         key={row.key}
+        // Isolated virtual rows cannot collapse neighboring margins: 1px per side preserves the 2px gap.
+        className={`[&_[data-session-row]]:my-px ${sectionSpacingAfter(row, rows[item.index + 1]) ?? ''}`}
         data-index={item.index}
         data-sidebar-virtual-start={item.start}
         ref={virtualizer.measureElement}
