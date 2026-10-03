@@ -902,7 +902,7 @@ describe('OpenCode proxy SSE forwarding', () => {
     const upstreamReceived = new Promise((resolve) => {
       markUpstreamReceived = resolve;
     });
-    upstream.get('/hang', () => {
+    upstream.get('/api/hang', () => {
       markUpstreamReceived();
     });
     upstreamServer = await listen(upstream);
@@ -952,7 +952,7 @@ describe('OpenCode proxy SSE forwarding', () => {
     const upstream = express();
     let upstreamBody;
     upstream.use(express.json());
-    upstream.post('/reset', (req) => {
+    upstream.post('/api/reset', (req) => {
       upstreamBody = req.body;
       req.socket.destroy();
     });
