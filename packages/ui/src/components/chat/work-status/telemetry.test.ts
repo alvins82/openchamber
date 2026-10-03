@@ -31,6 +31,7 @@ describe('turn telemetry', () => {
     expect(formatTelemetryDuration(1234)).toBe('1.2s');
     expect(formatTelemetryDuration(84000)).toBe('1m 24s');
     expect(formatTelemetryDuration(2796044)).toBe('46m 36s');
+    expect(formatTelemetryDuration(119_600)).toBe('2m 0s');
     expect(formatTelemetryDuration(84600)).toBe('1m 25s');
     expect(formatTelemetryTokens(0)).toBe('0');
     expect(formatTelemetryTokens(500)).toBe('500');

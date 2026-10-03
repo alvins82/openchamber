@@ -83,8 +83,9 @@ export const formatTelemetryDuration = (ms: number): string => {
   if (ms < 60_000) {
     return `${(ms / 1000).toFixed(1)}s`;
   }
-  const minutes = Math.floor(ms / 60_000);
-  const seconds = Math.round((ms % 60_000) / 1000);
+  const totalSeconds = Math.round(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
   return `${minutes}m ${seconds}s`;
 };
 
@@ -246,7 +247,8 @@ export function getLatestCompletedTurnStats(
     }
   }
   if (lastCompletedAssistantIdx < 0) return null;
-  if (records[lastCompletedAssistantIdx].info.role !== 'assistant') return null;
+  const lastAssistantInfo = records[lastCompletedAssistantIdx].info;
+  if (lastAssistantInfo.role !== 'assistant') return null;
   let turnStartIdx = -1;
   for (let i = records.length - 1; i >= 0; i -= 1) {
     const record = records[i];
@@ -259,7 +261,7 @@ export function getLatestCompletedTurnStats(
   if (turnStartIdx === -1) return null;
 
   const turnStartMs = nonnegative(records[turnStartIdx - 1].info.time.created);
-  const turnEndMs = nonnegative(records[lastCompletedAssistantIdx].info.time.completed);
+  const turnEndMs = nonnegative(lastAssistantInfo.time.completed);
   const elapsedDurationMs =
     turnStartMs !== null && turnEndMs !== null && turnEndMs >= turnStartMs
       ? turnEndMs - turnStartMs
