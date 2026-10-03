@@ -40,9 +40,27 @@ describe("translateWireEvent", () => {
     })
   })
 
+  test("session.forked carries the fork and parent ids (2.x sends no session.created for a fork)", () => {
+    const forked = translateWireEvent({
+      ...base,
+      type: "session.forked",
+      durable: { ...durable, version: 2 as const },
+      data: {
+        sessionID: "ses_fork",
+        parentID: "ses_1",
+        boundary: { type: "through", messageID: "msg_1" },
+      },
+    })
+    expect(forked).toEqual([{ type: "session.forked", properties: { sessionID: "ses_fork", parentID: "ses_1" } }])
+    expect(syncEventSessionID(forked[0])).toBe("ses_fork")
+  })
+
   test("session lifecycle events patch the session and emit switch messages", () => {
     const renamed = translateWireEvent({ ...base, type: "session.renamed", durable, data: { sessionID: "ses_1", title: "New" } })
     expect(renamed).toEqual([{ type: "session.patched", properties: { sessionID: "ses_1", patch: { title: "New", time: { updated: 1000 } } } }])
+
+    const metadata = translateWireEvent({ ...base, type: "session.metadata.updated", durable, data: { sessionID: "ses_1", metadata: { openchamber: { goal: { id: "g1" } } } } })
+    expect(metadata).toEqual([{ type: "session.patched", properties: { sessionID: "ses_1", patch: { metadata: { openchamber: { goal: { id: "g1" } } } } } }])
 
     const agent = translateWireEvent({ ...base, type: "session.agent.selected", durable, data: { sessionID: "ses_1", agent: "plan", previous: "build" } })
     expect(agent[0]).toEqual({ type: "session.patched", properties: { sessionID: "ses_1", patch: { agent: "plan" } } })
@@ -278,9 +296,10 @@ describe("translateWireEvent", () => {
       [{ ...base, type: "credential.updated", data: {} }, "credential"],
       [{ ...base, type: "credential.switched", data: { integrationID: "openai", credentialID: null } }, "credential"],
       [
-        { ...base, type: "project.updated", data: { id: "proj", canonical: "/repo", time: { created: 1, updated: 1 }, sandboxes: [] } },
+        { ...base, type: "project.updated", data: { id: "proj", canonical: "/repo", time: { created: 1, updated: 1, active: 1 }, sandboxes: [] } },
         "project",
       ],
+      [{ ...base, type: "websearch.updated", data: {} }, "websearch"],
     ]
     for (const [event, kind] of kinds) {
       expect(translateWireEvent(event)).toEqual([{ type: "catalog.updated", properties: { kind } }])
@@ -365,5 +384,53 @@ describe("routing helpers", () => {
     expect(syncEventSessionID(created)).toBe("ses_1")
     expect(syncEventMessageID(created)).toBe("msg_a")
     expect(messageIdFromEvent("evt_abc")).toBe("msg_abc")
+  })
+})
+
+describe("shell commands", () => {
+  const info = {
+    id: "sh_1",
+    status: "running" as const,
+    command: "sleep 300",
+    cwd: "/repo",
+    shell: "/bin/zsh",
+    file: "/tmp/sh_1.out",
+    metadata: { sessionID: "ses_1" },
+    time: { started: 1000 },
+  }
+
+  test("a command started for a session is reported with its session", () => {
+    expect(translateWireEvent({ ...base, type: "shell.created", data: { info } })).toEqual([
+      {
+        type: "shell.started",
+        properties: { shell: { id: "sh_1", sessionID: "ses_1", command: "sleep 300", file: "/tmp/sh_1.out", startedAt: 1000 } },
+      },
+    ])
+  })
+
+  test("a command that belongs to no session is not reported", () => {
+    expect(translateWireEvent({ ...base, type: "shell.created", data: { info: { ...info, metadata: {} } } })).toEqual([])
+  })
+
+  test("exit and removal both end the command", () => {
+    expect(translateWireEvent({ ...base, type: "shell.exited", data: { id: "sh_1", exit: 0, status: "exited" } })).toEqual([
+      { type: "shell.ended", properties: { shellID: "sh_1" } },
+    ])
+    expect(translateWireEvent({ ...base, type: "shell.deleted", data: { id: "sh_1" } })).toEqual([
+      { type: "shell.ended", properties: { shellID: "sh_1" } },
+    ])
+  })
+
+  test("a live synthetic message keeps its metadata, like the persisted one", () => {
+    const [event] = translateWireEvent({
+      ...base,
+      type: "session.synthetic",
+      durable,
+      data: { sessionID: "ses_1", text: "Continue", description: "Continuing after restart", metadata: { notice: "restart" } },
+    })
+    expect(event.type === "message.updated" ? event.properties.info : undefined).toMatchObject({
+      role: "synthetic",
+      metadata: { notice: "restart" },
+    })
   })
 })

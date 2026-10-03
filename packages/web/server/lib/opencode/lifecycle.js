@@ -1,6 +1,7 @@
+import { readOpenCodeInfo, readExternalOpenCodeVersion, isSupportedOpenCodeVersion, requireOpenCodeV2, UnsupportedOpenCodeVersionError } from './compatibility.js';
 import { spawn, spawnSync } from 'node:child_process';
 import net from 'node:net';
-import { stripAppImageArgv0Leak } from '../inherited-env.js';
+import { stripAppImageArgv0Leak, stripAppImageLauncherEnv } from '../inherited-env.js';
 import { registerManagedProcess, unregisterManagedProcess, reapOrphanedProcesses } from './managed-process-registry.js';
 import { applyProviderEnvAliases } from './provider-env-aliases.js';
 import { recordStartupPerformance } from './startup-performance.js';
@@ -47,9 +48,10 @@ const classifyOpenCodeVersion = (version) => {
     detail: `${OPENCODE_VERSION_REQUIREMENT_DETAIL}, found ${version.trim()}. Update OpenCode and start OpenChamber again.`,
   };
 };
-// Last-used directory plus the three most recently opened projects — deeper
-// tails are unlikely to be the user's first click and just add background work.
-const WARMUP_DIRECTORY_LIMIT = 4;
+// Only the directory the user will open anyway. On OpenCode 2 the first
+// directory-scoped read boots that location's whole MCP fleet, so warming
+// other projects "just in case" started processes nobody asked for (#4018).
+const WARMUP_DIRECTORY_LIMIT = 1;
 const WARMUP_REQUEST_TIMEOUT_MS = 30000;
 const MANAGED_STDERR_TAIL_MAX_BYTES = 32 * 1024;
 const HEALTH_FAILURE_DETAIL_MAX_LENGTH = 256;
@@ -141,7 +143,14 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
     managedStartupTimeoutMs = 30_000,
     now = Date.now,
     topUpV1SessionMigration = topUpV1Migration,
+    checkOpenCodeBinary = requireOpenCodeV2,
   } = deps;
+
+  let managedPreflight = null;
+  // The environment the managed OpenCode was launched with. Keys OpenCode
+  // takes from environment variables are never stored in it, so this is the
+  // only place their values can be read back (see auth.js).
+  let managedProcessEnv = null;
 
   const killProcessOnPortWin32 = (port) => {
     try {
@@ -666,11 +675,21 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
         signal: controller.signal,
       });
       clearTimeout(timeout);
-      // A 200 from `/api/info` is the whole readiness answer in 2.0.8.
-      return response.ok;
+      const info = await readOpenCodeInfo(response);
+      return info !== null && isSupportedOpenCodeVersion(info.version);
     } catch {
       return false;
     }
+  };
+
+  // The version of an explicitly configured server that answered but is not a
+  // supported OpenCode (v1, or 2.x below the minimum); null for anything else,
+  // including a server that is down.
+  const readUnsupportedExternalOpenCodeVersion = async (port, origin) => {
+    if (!port || port <= 0) return null;
+    const version = await readExternalOpenCodeVersion(origin ?? `http://127.0.0.1:${port}`, getOpenCodeAuthHeaders())
+      .catch(() => null);
+    return version && !isSupportedOpenCodeVersion(version) ? version : null;
   };
 
   const waitForOpenCodePort = async (timeoutMs = 15000) => {
@@ -707,6 +726,9 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
 
     await applyOpencodeBinaryFromSettings({ strict: true });
     const resolvedBinary = ensureOpencodeCliEnv();
+    const preflight = checkOpenCodeBinary(resolveManagedOpenCodeLaunchSpec(resolvedBinary));
+    managedPreflight = preflight.then(() => true, () => false);
+    await preflight;
     recordStartupPerformance('opencode.binary.ready', {
       attempt,
       durationMs: performance.now() - phaseStartedAt,
@@ -743,6 +765,19 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
       console.warn('[OpenCode] V1 session migration top-up failed:', error instanceof Error ? error.message : error);
     }
 
+    const processEnv = stripAppImageLauncherEnv(stripAppImageArgv0Leak(applyProviderEnvAliases({
+      ...shellEnv,
+      ...process.env,
+      ...managedOpenCodeEnv,
+      PATH: envPath,
+      // OpenCode 2 reads OPENCODE_PASSWORD before the legacy name, so a
+      // user's own OPENCODE_PASSWORD would otherwise win and every request
+      // we send with openCodePassword would get 401.
+      OPENCODE_PASSWORD: openCodePassword,
+      OPENCODE_SERVER_PASSWORD: openCodePassword,
+    })));
+    managedProcessEnv = processEnv;
+
     let serverInstance;
     try {
       if (state.isShuttingDown) throw new Error('OpenCode startup cancelled during shutdown');
@@ -753,13 +788,7 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
         timeout: managedStartupTimeoutMs,
         cwd: state.openCodeWorkingDirectory,
         shellEnvKeysCount: Object.keys(shellEnv).length,
-        env: stripAppImageArgv0Leak(applyProviderEnvAliases({
-          ...shellEnv,
-          ...process.env,
-          ...managedOpenCodeEnv,
-          PATH: envPath,
-          OPENCODE_SERVER_PASSWORD: openCodePassword,
-        })),
+        env: processEnv,
       });
 
       if (!serverInstance || !serverInstance.url) {
@@ -815,13 +844,14 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
   };
 
   const startOpenCode = async () => {
+    managedPreflight = null;
     let lastError = null;
     for (let attempt = 1; attempt <= START_OPEN_CODE_MAX_ATTEMPTS; attempt += 1) {
       try {
         return await startOpenCodeOnce(attempt);
       } catch (error) {
         lastError = error;
-        if (state.isShuttingDown || error?.code === 'OPENCODE_BINARY_INVALID') {
+        if (state.isShuttingDown || error instanceof UnsupportedOpenCodeVersionError || error?.code === 'OPENCODE_BINARY_INVALID') {
           break;
         }
         if (attempt >= START_OPEN_CODE_MAX_ATTEMPTS) {
@@ -849,6 +879,7 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
     }
 
     state.currentRestartPromise = (async () => {
+      managedPreflight = null;
       state.isRestartingOpenCode = true;
       state.isOpenCodeReady = false;
       state.openCodeNotReadySince = Date.now();
@@ -981,6 +1012,9 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
           continue;
         }
 
+        const info = await readOpenCodeInfo(response);
+        if (!info) throw new Error('The server did not identify itself as OpenCode 2.x. OpenChamber requires OpenCode 2.x; if the server runs an older OpenCode, upgrade it.');
+        if (!isSupportedOpenCodeVersion(info.version)) throw new UnsupportedOpenCodeVersionError(info.version);
         state.isOpenCodeReady = true;
         state.lastOpenCodeError = null;
         return;
@@ -1013,10 +1047,9 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       try {
-        const response = await fetch(buildOpenCodeUrl('/api/agent'), {
-          method: 'GET',
-          headers: { Accept: 'application/json', ...getOpenCodeAuthHeaders() },
-        });
+        const headers = { Accept: 'application/json', ...getOpenCodeAuthHeaders() };
+        if (defaultOpenCodeDirectory) headers['x-opencode-directory'] = encodeURIComponent(defaultOpenCodeDirectory);
+        const response = await fetch(buildOpenCodeUrl('/api/agent'), { method: 'GET', headers });
 
         if (response.ok) {
           // OpenCode 2.x answers `/api/*` with `{ location, data }`.
@@ -1078,6 +1111,7 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
   const bootstrapOpenCodeAtStartup = async () => {
     const bootstrapStartedAt = performance.now();
     let bootstrapError = null;
+    let unsupportedExternalVersion = null;
     recordStartupPerformance('opencode.bootstrap.start');
     try {
       // Before doing anything, reap any OpenCode process WE spawned in a prior
@@ -1118,6 +1152,20 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
         state.lastOpenCodeError = null;
         state.openCodeNotReadySince = 0;
         syncToHmrState();
+      } else if (env.ENV_EFFECTIVE_PORT && (unsupportedExternalVersion = await readUnsupportedExternalOpenCodeVersion(
+        env.ENV_EFFECTIVE_PORT,
+        env.ENV_CONFIGURED_OPENCODE_HOST?.origin,
+      ))) {
+        // The configured server is an OpenCode this OpenChamber cannot use.
+        // Attach to it anyway, not ready, so the compatibility check reports
+        // its version instead of a managed instance silently replacing it.
+        const label = env.ENV_CONFIGURED_OPENCODE_HOST ? env.ENV_CONFIGURED_OPENCODE_HOST.origin : `http://localhost:${env.ENV_EFFECTIVE_PORT}`;
+        console.warn(`OpenCode ${unsupportedExternalVersion} at ${label} is not supported by this OpenChamber`);
+        state.openCodeBaseUrl = env.ENV_CONFIGURED_OPENCODE_HOST?.origin ?? null;
+        setOpenCodePort(env.ENV_EFFECTIVE_PORT);
+        state.isExternalOpenCode = true;
+        syncToHmrState();
+        throw new UnsupportedOpenCodeVersionError(unsupportedExternalVersion);
       } else {
         // We never auto-attach to an arbitrary pre-existing OpenCode instance.
         // Attaching to an external server requires explicit opt-in via env
@@ -1144,6 +1192,9 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
         await waitForOpenCodeReady();
       } catch (error) {
         bootstrapError = error;
+        // Skip-start mode assumed readiness up front; a server that never
+        // proved itself must not keep reporting ready to startup diagnostics.
+        state.isOpenCodeReady = false;
         console.error(`OpenCode readiness check failed: ${error.message}`);
       }
     } catch (error) {
@@ -1164,12 +1215,18 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
     }
   };
 
+  // The directory server-side reads use when they have none of their own: the
+  // one warmed at startup, which OpenCode is running anyway. v2 answers a
+  // location read without a directory for its own working directory (the
+  // user's home for a managed OpenCode) and starts it, MCP servers included.
+  let defaultOpenCodeDirectory = null;
+
   // OpenCode initializes each project directory lazily on its first
   // directory-scoped request, and that initialization takes seconds on large
   // session stores. Without warming, the user's first session open pays it
   // interactively (the chat waits on the message fetch until the directory
-  // finishes initializing). Warm the most recently used directories right
-  // after readiness so the work overlaps UI startup instead. Sequential and
+  // finishes initializing). Warm the last-used directory right after
+  // readiness so the work overlaps UI startup instead. Sequential and
   // best-effort: a failed or slow directory never blocks the others for long,
   // and a restart invalidates the pass via the port/readiness guard.
   const warmOpenCodeDirectories = async () => {
@@ -1180,6 +1237,7 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
       return;
     }
     if (!Array.isArray(directories) || directories.length === 0) return;
+    defaultOpenCodeDirectory = directories[0] || null;
 
     const warmedPort = state.openCodePort;
     for (const directory of directories.slice(0, WARMUP_DIRECTORY_LIMIT)) {
@@ -1189,13 +1247,19 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
       try {
         const controller = new AbortController();
         timeout = setTimeout(() => controller.abort(), WARMUP_REQUEST_TIMEOUT_MS);
-        // Warming a directory is the point, not the answer: any directory-scoped
-        // read makes OpenCode initialise it. `/api/session` is the cheapest one
-        // that takes a directory (`/api/session/active` is global).
-        const url = `${buildOpenCodeUrl('/api/session', '')}?directory=${encodeURIComponent(directory)}&limit=1`;
+        // Warming a directory is the point, not the answer: any read that goes
+        // through v2's location middleware makes OpenCode initialise it.
+        // `/api/location` is the cheapest; `/api/session` is a global list and
+        // warms nothing. v2 takes the directory from this header, not from a
+        // `?directory=` query.
+        const url = buildOpenCodeUrl('/api/location', '');
         await fetch(url, {
           method: 'GET',
-          headers: { Accept: 'application/json', ...getOpenCodeAuthHeaders() },
+          headers: {
+            Accept: 'application/json',
+            'x-opencode-directory': encodeURIComponent(directory),
+            ...getOpenCodeAuthHeaders(),
+          },
           signal: controller.signal,
         });
       } catch {
@@ -1358,6 +1422,16 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
   };
 
   return {
+    /** The managed OpenCode's launch environment; null for an external OpenCode or before the first launch. */
+    getManagedOpenCodeProcessEnv: () => (state.isExternalOpenCode ? null : managedProcessEnv),
+    /** The directory to scope a server-side OpenCode read that has none, or null before startup picked one. */
+    getDefaultOpenCodeDirectory: () => defaultOpenCodeDirectory,
+    getManagedOpenCodePreflight: async () => {
+      const preflight = managedPreflight;
+      if (!preflight || state.isExternalOpenCode || state.isShuttingDown) return false;
+      const compatible = await preflight;
+      return compatible && preflight === managedPreflight && !state.isExternalOpenCode && !state.isShuttingDown;
+    },
     killProcessOnPort,
     startOpenCode,
     restartOpenCode,

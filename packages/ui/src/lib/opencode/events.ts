@@ -28,10 +28,12 @@ import {
   type PermissionRuleset,
   type Session,
   type SessionStatus,
+  type SessionOutcome,
   type StructuredError,
   type TokenUsageInfo,
 } from "./model"
 import { projectUserParts, structuredErrorText, toolAttachments, toolOutputText } from "./projection"
+import { runningShellFromWire, type RunningShell } from "./background-shell"
 
 // ---------------------------------------------------------------------------
 // Event vocabulary
@@ -50,7 +52,7 @@ export type SessionPatch = {
   permissions?: PermissionRuleset
   revert?: Session["revert"] | null
   outcome?: Session["outcome"]
-  /** Full replacement of the session's metadata (OpenChamber-owned overlay). */
+  /** Full replacement of the session's metadata. */
   metadata?: Metadata
   /** `archived: null` restores an archived session. */
   time?: Partial<Omit<Session["time"], "archived">> & { archived?: number | null }
@@ -66,7 +68,7 @@ export type MessagePatch = {
   snapshot?: { start?: string; end?: string; files?: string[] }
   retry?: Extract<Message, { role: "assistant" }>["retry"] | null
   /** Shell messages: exit status and captured output. */
-  shell?: { status: "running" | "exited" | "timeout" | "killed"; exit?: number; output?: Extract<Message, { role: "shell" }>["output"] }
+  shell?: { status: "running" | "exited" | "timeout" | "killed"; exit?: number; signal?: string; output?: Extract<Message, { role: "shell" }>["output"] }
 }
 
 /** State transitions of a tool call that need the part's existing state to apply. */
@@ -92,6 +94,8 @@ export type CatalogKind =
   | "model"
   | "credential"
   | "project"
+  /** Web search providers or the default choice changed (`websearch.updated`). */
+  | "websearch"
 
 export type SyncEvent =
   | { type: "server.connected"; properties: Record<never, never> }
@@ -100,6 +104,12 @@ export type SyncEvent =
   | { type: "session.patched"; properties: { sessionID: string; patch: SessionPatch } }
   | { type: "session.deleted"; properties: { sessionID: string } }
   /**
+   * A session was forked. OpenCode 2.x publishes no `session.created` for the
+   * fork and this event carries ids only, so the sync layer reads the fork's
+   * record and applies it as a `session.created`.
+   */
+  | { type: "session.forked"; properties: { sessionID: string; parentID: string } }
+  /**
    * A staged revert became permanent: OpenCode deleted the boundary message
    * `to` and everything after it. The reducer trims the same range locally,
    * because no `message.removed` follows and a later fetch keeps whatever the
@@ -107,7 +117,11 @@ export type SyncEvent =
    */
   | { type: "session.revert.committed"; properties: { sessionID: string; to: string } }
   | { type: "session.status"; properties: { sessionID: string; status: SessionStatus } }
-  | { type: "session.idle"; properties: { sessionID: string } }
+  /**
+   * `outcome` is set when the event ends a turn (`session.execution.*`) and
+   * absent for a bare status change. Only `interrupted` is an explicit stop.
+   */
+  | { type: "session.idle"; properties: { sessionID: string; outcome?: SessionOutcome } }
   | { type: "session.error"; properties: { sessionID: string; error: StructuredError } }
   | { type: "message.updated"; properties: { info: Message } }
   | { type: "message.patched"; properties: { sessionID: string; messageID: string; patch: MessagePatch } }
@@ -122,6 +136,10 @@ export type SyncEvent =
   | { type: "permission.replied"; properties: { sessionID: string; requestID: string } }
   | { type: "form.created"; properties: { form: FormRequest } }
   | { type: "form.settled"; properties: { sessionID: string; formID: string } }
+  /** A session's shell command started; commands that belong to no session are not reported. */
+  | { type: "shell.started"; properties: { shell: RunningShell } }
+  /** A shell command exited or was removed. */
+  | { type: "shell.ended"; properties: { shellID: string } }
   | { type: "vcs.branch.updated"; properties: { branch?: string } }
   | { type: "mcp.status.changed"; properties: { server: string } }
   | { type: "catalog.updated"; properties: { kind: CatalogKind } }
@@ -132,7 +150,10 @@ export type SyncEvent =
   | { type: "location.shutdown"; properties: Record<never, never> }
   // OpenChamber's own server frames that ride the same stream.
   | { type: "openchamber.notification"; properties: OpenchamberNotification }
-  | { type: "openchamber.permission-auto-accept"; properties: { sessions: Record<string, boolean>; revision?: number } }
+  // `modes` is the policy; `sessions` is its on/off view for clients from before the modes.
+  | { type: "openchamber.permission-auto-accept"; properties: { sessions: Record<string, boolean>; modes?: Record<string, "ask" | "safety" | "auto">; revision?: number } }
+  /** The server did not answer this request on the user's behalf: it waits for the user. */
+  | { type: "openchamber.permission-left-for-user"; properties: { permissionId: string; sessionId: string; directory: string | null } }
 
 /** Agent-completion / restart notices the OpenChamber server publishes for non-web runtimes. */
 export type OpenchamberNotification = {
@@ -229,8 +250,14 @@ export function translateWireEvent(event: OpenCodeEvent): SyncEvent[] {
     }
     case "session.deleted":
       return [{ type: "session.deleted", properties: { sessionID: event.data.sessionID } }]
+    // No `session.created` follows a fork in 2.x; see the sync event's doc.
+    case "session.forked":
+      return [{ type: "session.forked", properties: { sessionID: event.data.sessionID, parentID: event.data.parentID } }]
     case "session.renamed":
       return [sessionEvent(event.data.sessionID, { title: event.data.title, time: { updated: event.created } })]
+    // OpenCode's record holds the full metadata, so this replaces it.
+    case "session.metadata.updated":
+      return [sessionEvent(event.data.sessionID, { metadata: event.data.metadata })]
     case "session.moved":
       return [
         sessionEvent(event.data.sessionID, {
@@ -315,7 +342,7 @@ export function translateWireEvent(event: OpenCodeEvent): SyncEvent[] {
     case "session.execution.succeeded":
       return [
         sessionEvent(event.data.sessionID, { outcome: "succeeded", time: { idle: event.created, updated: event.created } }),
-        { type: "session.idle", properties: { sessionID: event.data.sessionID } },
+        { type: "session.idle", properties: { sessionID: event.data.sessionID, outcome: "succeeded" } },
       ]
     case "session.execution.interrupted":
       // `shutdown` is OpenCode itself going away mid-turn. It keeps the
@@ -327,7 +354,7 @@ export function translateWireEvent(event: OpenCodeEvent): SyncEvent[] {
       if (event.data.reason === "shutdown") return []
       return [
         sessionEvent(event.data.sessionID, { outcome: "interrupted", time: { idle: event.created, updated: event.created } }),
-        { type: "session.idle", properties: { sessionID: event.data.sessionID } },
+        { type: "session.idle", properties: { sessionID: event.data.sessionID, outcome: "interrupted" } },
       ]
     case "session.execution.failed":
       return [
@@ -400,6 +427,7 @@ export function translateWireEvent(event: OpenCodeEvent): SyncEvent[] {
               time: { created: event.created },
               text: event.data.text,
               description: event.data.description,
+              metadata: event.data.metadata,
             }),
           },
         },
@@ -790,6 +818,8 @@ export function translateWireEvent(event: OpenCodeEvent): SyncEvent[] {
       return [{ type: "catalog.updated", properties: { kind: "provider" } }]
     case "model.updated":
       return [{ type: "catalog.updated", properties: { kind: "model" } }]
+    case "websearch.updated":
+      return [{ type: "catalog.updated", properties: { kind: "websearch" } }]
 
     // --- known events the sync layer deliberately does not model -------------
     //
@@ -801,9 +831,6 @@ export function translateWireEvent(event: OpenCodeEvent): SyncEvent[] {
     // acting here too would only double every read.
     case "integration.updated":
       return []
-    // The fork's own `session.created` carries everything the stores need.
-    case "session.forked":
-      return []
     // Queue-vs-steer placement of a pending inbox item is not shown.
     case "session.inbox.delivery.changed":
       return []
@@ -814,7 +841,6 @@ export function translateWireEvent(event: OpenCodeEvent): SyncEvent[] {
     // Catalogs OpenChamber does not surface as lists of their own.
     case "models-dev.refreshed":
     case "reference.updated":
-    case "websearch.updated":
       return []
     // Resources of an MCP server; OpenChamber shows connection status only
     // (`mcp.status.changed`).
@@ -827,11 +853,20 @@ export function translateWireEvent(event: OpenCodeEvent): SyncEvent[] {
     case "worktree.updated":
     case "worktree.resolved":
       return []
-    // Free-standing shells and PTYs are the TUI's and the terminal panel's
-    // own transports; neither reads them from this stream.
-    case "shell.created":
-    case "shell.deleted":
+    // --- shell commands -------------------------------------------------------
+
+    // A session's running commands keep its turn open (background commands),
+    // so only commands tagged with a session are reported.
+    case "shell.created": {
+      const shell = runningShellFromWire(event.data.info)
+      return shell ? [{ type: "shell.started", properties: { shell } }] : []
+    }
     case "shell.exited":
+    case "shell.deleted":
+      return [{ type: "shell.ended", properties: { shellID: event.data.id } }]
+
+    // PTYs are the terminal panel's own transport; it does not read them from
+    // this stream.
     case "pty.created":
     case "pty.updated":
     case "pty.deleted":
@@ -881,6 +916,7 @@ export function syncEventSessionID(event: SyncEvent): string | undefined {
       return event.properties.form.sessionID
     case "session.patched":
     case "session.deleted":
+    case "session.forked":
     case "session.revert.committed":
     case "session.status":
     case "session.idle":

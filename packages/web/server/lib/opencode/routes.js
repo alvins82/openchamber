@@ -1,5 +1,5 @@
+import { readOpenCodeInfo, isSupportedOpenCodeVersion } from './compatibility.js';
 import express from 'express';
-import { createProjectIdFromPath } from '../projects/project-id.js';
 import fs from 'fs';
 import path from 'path';
 import {
@@ -8,18 +8,27 @@ import {
 import { getClaudeCliAuthStatus } from './claude-cli-auth.js';
 import { OPENCODE_CONFIG_DIR } from './shared.js';
 import { settingsSurfaceOf } from './settings-files.js';
+import { parseWebSearchSelection } from './config-v2.js';
+import { getWebSearchSource, setWarmingEnabled, setWebSearchSelection } from './websearch-config.js';
+import {
+  CREDENTIAL_LIST_ERROR,
+  ENTERPRISE_MODE_ERROR,
+  isCredentialListRequest,
+  isEnterpriseMode,
+  isProviderConnectRequest,
+} from '../enterprise-mode.js';
 
 export const registerOpenCodeRoutes = (app, dependencies) => {
   const {
     crypto,
     getOpenCodeResolutionSnapshot,
     getOpenCodeUpgradeCapability,
+    upgradeOpenCodeCli,
+    getOpenCodeCompatibility,
+    installOpenCodeV2,
     formatSettingsResponse,
-    readSettingsFromDisk,
     readSettingsFromDiskMigrated,
     persistSettings,
-    sanitizeProjects,
-    validateDirectoryPath,
     resolveProjectDirectory,
     getProviderSources,
     removeProviderConfig,
@@ -27,7 +36,6 @@ export const registerOpenCodeRoutes = (app, dependencies) => {
     refreshOpenCodeAfterConfigChange,
     buildOpenCodeUrl,
     getOpenCodeAuthHeaders,
-    fsPromises = fs.promises,
   } = dependencies;
 
   let authLibrary = null;
@@ -99,26 +107,57 @@ export const registerOpenCodeRoutes = (app, dependencies) => {
     }
   });
 
-  /**
-   * OpenCode 2.x has no upgrade route. v1 exposed `POST /global/upgrade` and
-   * OpenChamber drove it from Settings; the replacement is whatever installed
-   * OpenCode in the first place, which OpenChamber cannot run on the user's
-   * behalf. Answer plainly rather than 404, so the UI can say what to do.
-   */
+  app.get('/api/opencode/compatibility', async (_req, res) => {
+    try { res.json(await getOpenCodeCompatibility()); }
+    catch { res.status(503).json({ error: 'Could not check OpenCode compatibility.' }); }
+  });
+
+  let installInFlight = null;
+  app.post('/api/opencode/install-v2', async (_req, res) => {
+    try {
+      if (!installInFlight) {
+        installInFlight = (async () => {
+          const compatibility = await getOpenCodeCompatibility();
+          if (!compatibility.canInstall) return false;
+          await installOpenCodeV2();
+          return true;
+        })().finally(() => { installInFlight = null; });
+      }
+      const installed = await installInFlight;
+      if (!installed) return res.status(409).json({ success: false, error: 'Automatic OpenCode v2 installation is unavailable for this runtime.' });
+      return res.json({ success: true });
+    } catch {
+      return res.status(500).json({ success: false, error: 'OpenCode v2 installation or restart failed. Retry or use the installation guide.' });
+    }
+  });
+
+  let upgradeInFlight = null;
   app.post('/api/opencode/upgrade', async (_req, res) => {
     const capability = getOpenCodeUpgradeCapability();
-    if (capability.reason === 'bundled') {
+    if (!capability.supported) {
+      const bundled = capability.reason === 'bundled';
+      const pinned = capability.reason === 'policy';
       return res.status(409).json({
         success: false,
-        code: 'OPENCODE_UPGRADE_MANAGED_BY_OPENCHAMBER',
-        error: 'OpenCode is bundled with OpenChamber Desktop and updates with the app.',
+        code: bundled ? 'OPENCODE_UPGRADE_MANAGED_BY_OPENCHAMBER' : 'OPENCODE_UPGRADE_UNSUPPORTED',
+        error: bundled
+          ? 'OpenCode is bundled with OpenChamber Desktop and updates with the app.'
+          : pinned
+            ? 'Your administrator manages this OpenCode installation.'
+            : 'This OpenCode runtime cannot be upgraded by OpenChamber.',
       });
     }
-    return res.status(409).json({
-      success: false,
-      code: 'OPENCODE_UPGRADE_UNSUPPORTED',
-      error: 'OpenCode 2 updates through its own installer. Run the update the way you installed OpenCode, then restart OpenChamber.',
-    });
+    try {
+      // Multiple tabs share one installation. Clear both success and failure so
+      // a later explicit attempt can run again.
+      if (!upgradeInFlight) {
+        upgradeInFlight = upgradeOpenCodeCli().finally(() => { upgradeInFlight = null; });
+      }
+      await upgradeInFlight;
+      return res.json({ success: true });
+    } catch (error) {
+      return res.status(500).json({ success: false, error: error.message });
+    }
   });
 
   app.get('/api/opencode/upgrade-status', async (_req, res) => {
@@ -145,9 +184,12 @@ export const registerOpenCodeRoutes = (app, dependencies) => {
       if (!currentVersion || !latestVersion) {
         return res.json({ available: null, currentVersion, latestVersion: latestVersion || null, upgrade: capability });
       }
-      // A bundled binary updates together with the desktop app, so a newer
-      // OpenCode is not something the user can act on: never announce it.
-      const available = capability.reason === 'bundled' ? false : compareVersions(latestVersion, currentVersion) > 0;
+      // A bundled binary updates together with the desktop app, and a pinned
+      // one with the administrator's rollout, so a newer OpenCode is not
+      // something the user can act on: never announce it.
+      const available = capability.reason === 'bundled' || capability.reason === 'policy'
+        ? false
+        : compareVersions(latestVersion, currentVersion) > 0;
       return res.json({
         available,
         currentVersion,
@@ -178,7 +220,8 @@ export const registerOpenCodeRoutes = (app, dependencies) => {
           error: info?.error || healthResponse.statusText || 'OpenCode health check failed',
         });
       }
-      return res.json({ healthy: true });
+      const parsed = await readOpenCodeInfo(Response.json(info));
+      return res.json({ healthy: parsed !== null && isSupportedOpenCodeVersion(parsed.version) });
     } catch (error) {
       return res.status(503).json({
         healthy: false,
@@ -244,14 +287,14 @@ export const registerOpenCodeRoutes = (app, dependencies) => {
 
       const sources = getProviderSources(providerId, directory);
       const { getProviderAuth } = await getAuthLibrary();
-      const auth = getProviderAuth(providerId);
       sources.sources.auth.exists = providerId === 'claude-code'
         ? getClaudeCliAuthStatus().connected
-        : Boolean(auth);
+        : Boolean(await getProviderAuth(providerId));
 
       return res.json({
         providerId,
         sources: sources.sources,
+        config: sources.config,
       });
     } catch (error) {
       console.error('Failed to get provider sources:', error);
@@ -259,7 +302,27 @@ export const registerOpenCodeRoutes = (app, dependencies) => {
     }
   });
 
-  app.put('/api/provider', async (req, res) => {
+  // Enterprise mode: model providers come from the OpenCode config the
+  // administrator controls, so nothing in the app may connect a new one or
+  // add a key. These OpenCode routes otherwise reach it through the generic
+  // proxy; removing or switching an existing account stays allowed, it only
+  // narrows access. The real lock is OpenCode's `provider.use` policy.
+  const refuseInEnterpriseMode = (_req, res, next) => (
+    isEnterpriseMode() ? res.status(403).json({ error: ENTERPRISE_MODE_ERROR, code: 'enterprise_mode' }) : next()
+  );
+  app.use((req, res, next) => (
+    isProviderConnectRequest(req.method, req.path) ? refuseInEnterpriseMode(req, res, next) : next()
+  ));
+
+  // Every stored key, secrets included (OpenCode 2.0.20): this server reads it
+  // for itself through `auth.js`, and no client gets it through the proxy.
+  app.use((req, res, next) => (
+    isCredentialListRequest(req.method, req.path)
+      ? res.status(403).json({ error: CREDENTIAL_LIST_ERROR, code: 'credential_list_refused' })
+      : next()
+  ));
+
+  app.put('/api/provider', refuseInEnterpriseMode, async (req, res) => {
     try {
       const providerID = typeof req.body?.providerID === 'string'
         ? req.body.providerID.trim()
@@ -297,8 +360,10 @@ export const registerOpenCodeRoutes = (app, dependencies) => {
         }
       }
 
+      // OpenCode 2 keeps credentials in its own store, out of this server's
+      // sight, so the form states whether one exists or follows this write.
       const { getProviderAuth } = await getAuthLibrary();
-      const hasStoredAuth = Boolean(getProviderAuth(providerID));
+      const hasStoredAuth = req.body?.hasCredential === true || Boolean(await getProviderAuth(providerID));
       const upsertResult = upsertProviderConfig(providerID, config, directory, scope, { hasStoredAuth });
 
       return res.json({
@@ -313,6 +378,50 @@ export const registerOpenCodeRoutes = (app, dependencies) => {
       const status = typeof error?.statusCode === 'number' ? error.statusCode : 500;
       console.error('Failed to upsert provider config:', error);
       return res.status(status).json({ error: error.message || 'Failed to save provider config' });
+    }
+  });
+
+  // The web search choice (`websearch` in OpenCode config). OpenCode watches
+  // the file and announces `config.updated`, so nothing restarts.
+  // Whether a project config decides `websearch` for the directory, so
+  // Settings can say so instead of letting a write snap back.
+  app.get('/api/config/websearch', async (req, res) => {
+    try {
+      const resolved = await resolveProjectDirectory(req);
+      return res.json(getWebSearchSource(resolved.directory || null));
+    } catch (error) {
+      console.error('Failed to read the web search config source:', error);
+      return res.status(500).json({ error: error.message || 'Failed to read the web search config source' });
+    }
+  });
+
+  app.put('/api/config/websearch', (req, res) => {
+    const selection = parseWebSearchSelection(req.body?.selection);
+    if (selection === undefined) {
+      return res.status(400).json({ error: 'selection must be false, null, "random" or a provider id' });
+    }
+    try {
+      const result = setWebSearchSelection(selection);
+      return res.json({ success: true, changed: result.changed });
+    } catch (error) {
+      console.error('Failed to save the web search choice:', error);
+      return res.status(500).json({ error: error.message || 'Failed to save the web search choice' });
+    }
+  });
+
+  // Session warming (`warming` in OpenCode config), written like the web
+  // search choice above. Settings reads the effective value from OpenCode.
+  app.put('/api/config/warming', (req, res) => {
+    const enabled = req.body?.enabled;
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({ error: 'enabled must be a boolean' });
+    }
+    try {
+      const result = setWarmingEnabled(enabled);
+      return res.json({ success: true, changed: result.changed });
+    } catch (error) {
+      console.error('Failed to save session warming:', error);
+      return res.status(500).json({ error: error.message || 'Failed to save session warming' });
     }
   });
 
@@ -385,59 +494,6 @@ export const registerOpenCodeRoutes = (app, dependencies) => {
     }
   });
 
-  app.post('/api/opencode/directory', async (req, res) => {
-    try {
-      const requestedPath = typeof req.body?.path === 'string' ? req.body.path.trim() : '';
-      if (!requestedPath) {
-        return res.status(400).json({ error: 'Path is required' });
-      }
-
-      if (req.body?.create === true) {
-        await fsPromises.mkdir(path.resolve(requestedPath), { recursive: true });
-      }
-
-      const validated = await validateDirectoryPath(requestedPath);
-      if (!validated.ok) {
-        return res.status(400).json({ error: validated.error });
-      }
-
-      const resolvedPath = validated.directory;
-      const currentSettings = await readSettingsFromDisk();
-      const existingProjects = sanitizeProjects(currentSettings.projects) || [];
-      const existing = existingProjects.find((project) => project.path === resolvedPath) || null;
-
-      const nextProjects = existing
-        ? existingProjects
-        : [
-            ...existingProjects,
-            {
-              id: createProjectIdFromPath(resolvedPath),
-              path: resolvedPath,
-              addedAt: Date.now(),
-              lastOpenedAt: Date.now(),
-            },
-          ];
-
-      const activeProjectId = existing ? existing.id : nextProjects[nextProjects.length - 1].id;
-
-      const updated = await persistSettings({
-        projects: nextProjects,
-        activeProjectId,
-        lastDirectory: resolvedPath,
-      });
-
-      return res.json({
-        success: true,
-        restarted: false,
-        path: resolvedPath,
-        settings: updated,
-      });
-    } catch (error) {
-      console.error('Failed to update OpenCode working directory:', error);
-      return res.status(500).json({ error: error.message || 'Failed to update working directory' });
-    }
-  });
-
   // Behavior / Global AGENTS.md endpoints
   const AGENTS_MD_PATH = path.join(OPENCODE_CONFIG_DIR, 'AGENTS.md');
   const MAX_BEHAVIOR_PROMPT_SIZE = 1024 * 1024; // 1 MB
@@ -463,6 +519,24 @@ export const registerOpenCodeRoutes = (app, dependencies) => {
 
       if (content.length > MAX_BEHAVIOR_PROMPT_SIZE) {
         return res.status(413).json({ error: `Content exceeds maximum size of ${MAX_BEHAVIOR_PROMPT_SIZE} bytes` });
+      }
+
+      // `expectedContent` is what the editor loaded (null: no file). A file
+      // changed on disk since then is not overwritten with the stale copy.
+      if (req.body && Object.prototype.hasOwnProperty.call(req.body, 'expectedContent')) {
+        const expected = req.body.expectedContent;
+        let current = null;
+        try {
+          current = await fs.promises.readFile(AGENTS_MD_PATH, 'utf8');
+        } catch (error) {
+          if (error?.code !== 'ENOENT') throw error;
+        }
+        if (current !== expected) {
+          return res.status(409).json({
+            error: 'AGENTS.md changed on disk since it was loaded',
+            code: 'AGENTS_MD_CONFLICT',
+          });
+        }
       }
 
       // Ensure parent directory exists

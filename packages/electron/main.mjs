@@ -1,3 +1,4 @@
+import { canReuseManagedOpenCodePreflight } from './opencode-readiness.mjs';
 import { app, BrowserWindow, dialog, ipcMain, Menu, MessageChannelMain, nativeTheme, net as electronNet, Notification, powerMonitor, powerSaveBlocker, protocol, session, shell, webContents } from 'electron';
 import contextMenu from 'electron-context-menu';
 import log from 'electron-log/main.js';
@@ -55,6 +56,7 @@ import { probeElectronHostWithDeadline } from './electron-host-probe.mjs';
 import { assertUpdaterCapability } from './updater-capability.mjs';
 import { checkForDesktopUpdate } from './updater-check.mjs';
 import { resolveUpdaterChannel } from './updater-channel.mjs';
+import { createContextMenuLabels, menuLabel, normalizeMenuLocale, roleMenuItem } from './menu-locales.mjs';
 import { resolveUpdaterFeed } from './updater-feed.mjs';
 import {
   buildLinuxInstalledApps,
@@ -69,11 +71,14 @@ import {
 } from './linux-autostart.mjs';
 import { unsupportedAppSpecificOpenError, validateLocalPath } from './path-open-utils.mjs';
 import { shouldAllowBrowserPanelCertificateError } from './browser-panel-security.mjs';
+import { shouldBlockGuestFrameNavigation } from './guest-frame-navigation.mjs';
 import { createRelayDevTunnelBridge } from './relay-dev-tunnel.mjs';
 import { attachRendererRecovery } from './renderer-recovery.mjs';
+import { createLoadFailureWarningFilter } from './load-failure-warnings.mjs';
 import { mintOutsideFileGrant } from '@openchamber/web/server/lib/fs/routes.js';
 import { fetchUpdateNotes } from '@openchamber/web/server/lib/changelog/update-notes.js';
 import { applyConnectAttemptTimeout } from '@openchamber/web/server/lib/network-defaults.js';
+import { isNetworkAccessBlocked } from '@openchamber/web/server/lib/enterprise-mode.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -102,6 +107,19 @@ log.transports.console.level = isDev ? 'debug' : 'warn';
 // the fact. Route all console calls through electron-log so server-side
 // diagnostics are persisted.
 Object.assign(console, log.functions);
+
+// Node prints process warnings through console.error, so Electron's per-attempt
+// "Failed to load URL" warnings would flood main.log while the browser panel
+// waits for a dev server. Wrap Node's printer so repeats go to debug instead.
+const printProcessWarning = process.listeners('warning').find((listener) => listener.name === 'onWarning');
+if (printProcessWarning) {
+  const shouldReportWarning = createLoadFailureWarningFilter();
+  process.off('warning', printProcessWarning);
+  process.on('warning', (warning) => {
+    if (shouldReportWarning(warning)) printProcessWarning(warning);
+    else log.debug(`electron: ${warning.message}`);
+  });
+}
 
 const STARTUP_PERF_ENABLED_VALUES = new Set(['1', 'true']);
 const ELECTRON_STARTUP_PERF_PHASES = new Set([
@@ -1250,10 +1268,15 @@ const spawnLocalServer = async () => {
   const lanAccessEnabled = settings.desktopLanAccessEnabled === true;
   setDesktopKeepAwakeActive(settings.desktopKeepAwakeEnabled === true);
   const desktopUiPassword = typeof settings.desktopUiPassword === 'string' ? settings.desktopUiPassword.trim() : '';
-  const lanAccessBlockedByMissingPassword = lanAccessEnabled && !desktopUiPassword;
-  const effectiveLanAccessEnabled = lanAccessEnabled && !lanAccessBlockedByMissingPassword;
+  // Enterprise mode keeps the app on this machine unless the administrator
+  // allowed network access (the server refuses a network bind as well).
+  const lanAccessBlockedByEnterprise = lanAccessEnabled && isNetworkAccessBlocked();
+  const lanAccessBlockedByMissingPassword = lanAccessEnabled && !lanAccessBlockedByEnterprise && !desktopUiPassword;
+  const effectiveLanAccessEnabled = lanAccessEnabled && !lanAccessBlockedByEnterprise && !lanAccessBlockedByMissingPassword;
   const bindHost = effectiveLanAccessEnabled ? LAN_BIND_HOST : LOOPBACK_BIND_HOST;
-  if (lanAccessBlockedByMissingPassword) {
+  if (lanAccessBlockedByEnterprise) {
+    log.warn('[desktop] LAN access is turned off by enterprise mode; starting on loopback only.');
+  } else if (lanAccessBlockedByMissingPassword) {
     log.warn('[desktop] LAN access was requested without a desktop UI password; starting on loopback only.');
   }
 
@@ -1278,7 +1301,9 @@ const spawnLocalServer = async () => {
   // both the Electron main and the server running inside it.
   process.env.OPENCHAMBER_HOST = bindHost;
   process.env.OPENCHAMBER_DESKTOP_LAN_ACCESS_ACTIVE = effectiveLanAccessEnabled ? 'true' : 'false';
-  if (lanAccessBlockedByMissingPassword) {
+  if (lanAccessBlockedByEnterprise) {
+    process.env.OPENCHAMBER_DESKTOP_LAN_ACCESS_BLOCKED_REASON = 'enterprise-mode';
+  } else if (lanAccessBlockedByMissingPassword) {
     process.env.OPENCHAMBER_DESKTOP_LAN_ACCESS_BLOCKED_REASON = 'missing-password';
   } else {
     delete process.env.OPENCHAMBER_DESKTOP_LAN_ACCESS_BLOCKED_REASON;
@@ -1577,7 +1602,11 @@ const loginRemoteAndIssueClientToken = async ({ url, password, trustDevice, requ
     ? { clientKind: LOCAL_DESKTOP_CLIENT_KIND, dedupeKey: LOCAL_DESKTOP_CLIENT_DEDUPE_KEY, ...desktopDeviceMetadata() }
     : { clientKind: REMOTE_DESKTOP_CLIENT_KIND, dedupeKey: `desktop:${await getOrCreateDesktopInstallId()}`, ...desktopDeviceMetadata() };
 
-  const loginResponse = await fetch(new URL('/auth/session', `${baseUrl}/`).toString(), {
+  // Keep a sub-path prefix (https://host/openchamber); new URL('/auth/session', base) would drop it.
+  const loginUrl = new URL(baseUrl);
+  loginUrl.pathname = `${loginUrl.pathname.replace(/\/+$/, '')}/auth/session`;
+  loginUrl.search = '';
+  const loginResponse = await fetch(loginUrl.toString(), {
     method: 'POST',
     signal: AbortSignal.timeout(10_000),
     headers: {
@@ -1662,6 +1691,21 @@ const setTaskbarProgress = (value) => {
 };
 
 const pendingDeepLinks = [];
+const PENDING_SESSION_LINK_FALLBACK_MS = 10_000;
+
+// Hands the main window's renderer the session links that arrived before it
+// could listen, as { sessionId, messageId? }; the renderer validates both.
+const takePendingSessionDeepLinks = () => {
+  const taken = [];
+  for (let index = pendingDeepLinks.length - 1; index >= 0; index -= 1) {
+    const link = pendingDeepLinks[index];
+    if (link.type !== 'session' || !link.value) continue;
+    pendingDeepLinks.splice(index, 1);
+    const messageId = readDeepLinkQueryParam(link.raw, 'message');
+    taken.unshift(messageId ? { sessionId: link.value, messageId } : { sessionId: link.value });
+  }
+  return taken;
+};
 
 const parseDeepLink = (raw) => {
   if (typeof raw !== 'string') return null;
@@ -1677,6 +1721,16 @@ const parseDeepLink = (raw) => {
       ? decodeURIComponent(segments.join('/'))
       : '';
     return { type, value, raw: trimmed };
+  } catch {
+    return null;
+  }
+};
+
+const readDeepLinkQueryParam = (raw, name) => {
+  if (typeof raw !== 'string') return null;
+  try {
+    const value = new URL(raw).searchParams.get(name);
+    return value && value.trim() ? value.trim() : null;
   } catch {
     return null;
   }
@@ -1933,7 +1987,12 @@ const dispatchDeepLink = (link) => {
   }
 
   if (link.type === 'session' && link.value) {
-    emitToPrimaryWindow('openchamber:open-session', { sessionId: link.value });
+    // A message link (`openchamber://session/<id>?message=<id>`) also names
+    // the message to show; the renderer validates both IDs.
+    const messageId = readDeepLinkQueryParam(link.raw, 'message');
+    emitToPrimaryWindow('openchamber:open-session', messageId
+      ? { sessionId: link.value, messageId }
+      : { sessionId: link.value });
     return;
   }
   if (link.type === 'host' && link.value) {
@@ -1943,10 +2002,21 @@ const dispatchDeepLink = (link) => {
   log.warn('[electron] unknown deep-link action:', link.type);
 };
 
-const flushPendingDeepLinks = () => {
+// Session links wait for the renderer to take them (desktop_take_pending_session_links)
+// once its listener is mounted: an event sent when the page has merely loaded
+// reached no listener on a cold start and the link was lost. The late flush
+// still delivers them to a renderer that never asks (an older remote UI).
+const flushPendingDeepLinks = ({ includeSessions }) => {
+  const kept = [];
   while (pendingDeepLinks.length > 0) {
-    dispatchDeepLink(pendingDeepLinks.shift());
+    const link = pendingDeepLinks.shift();
+    if (link.type === 'session' && !includeSessions) {
+      kept.push(link);
+      continue;
+    }
+    dispatchDeepLink(link);
   }
+  pendingDeepLinks.push(...kept);
 };
 
 const isMainWindowReadyForDeepLink = () =>
@@ -2182,8 +2252,12 @@ const createBrowserWindow = ({ label, restoreGeometry, url, runtimeConfig = {}, 
 
   // Any navigation target that isn't our own UI (local server / configured
   // desktop hosts) should open in the user's default browser, not spawn
-  // another Electron window loading arbitrary web content.
-  const isAllowedNavigationUrl = (raw) => {
+  // another Electron window loading arbitrary web content. Configured hosts
+  // count only for navigating this window (host switching); a link opened
+  // into a new window (`window.open`, `target=_blank`) to a host goes
+  // through openHostWindow instead, since a bare window on a host page lacks
+  // the desktop runtime and its credentials and only shows the lock screen.
+  const isAllowedNavigationUrl = (raw, { includeHosts = true } = {}) => {
     try {
       const url = new URL(raw);
       if (url.protocol === 'devtools:') return true;
@@ -2208,7 +2282,7 @@ const createBrowserWindow = ({ label, restoreGeometry, url, runtimeConfig = {}, 
         } catch {
         }
       }
-      const hosts = readDesktopHostsConfig()?.hosts || [];
+      const hosts = includeHosts ? readDesktopHostsConfig()?.hosts || [] : [];
       for (const entry of hosts) {
         if (typeof entry?.url !== 'string') continue;
         try {
@@ -2223,7 +2297,16 @@ const createBrowserWindow = ({ label, restoreGeometry, url, runtimeConfig = {}, 
   };
 
   browserWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (isAllowedNavigationUrl(url)) {
+    // A link to a saved instance opens that instance in the app, on the
+    // session it names, not as a bare page of its web UI.
+    const host = findConfiguredHostForUrl(url);
+    if (host) {
+      void openHostWindow(host, sessionRouteFromUrl(url), { reuseOpenWindow: true }).catch((error) => {
+        log.warn('[electron] failed to open host window from link:', error);
+      });
+      return { action: 'deny' };
+    }
+    if (isAllowedNavigationUrl(url, { includeHosts: false })) {
       return { action: 'allow' };
     }
     void shell.openExternal(url).catch(() => {});
@@ -2234,6 +2317,32 @@ const createBrowserWindow = ({ label, restoreGeometry, url, runtimeConfig = {}, 
     if (isAllowedNavigationUrl(url)) return;
     event.preventDefault();
     void shell.openExternal(url).catch(() => {});
+  });
+
+  // An extension frame navigating itself would carry data out in the URL;
+  // refused before the request (see guest-frame-navigation.mjs).
+  browserWindow.webContents.on('will-frame-navigate', (details) => {
+    let frameOrigin;
+    try {
+      frameOrigin = details.frame?.origin;
+    } catch {
+      frameOrigin = undefined;
+    }
+    if (!shouldBlockGuestFrameNavigation({
+      isMainFrame: details.isMainFrame,
+      frameOrigin,
+      url: details.url,
+      isAppOrigin: isAllowedNavigationUrl,
+    })) return;
+    details.preventDefault();
+    let host = '';
+    try {
+      host = new URL(details.url).host;
+    } catch {
+      host = '';
+    }
+    // Only the host: the URL itself may be the data being carried out.
+    log.warn(`[guests] refused an extension frame navigating to ${host || 'an invalid URL'}`);
   });
 
   browserWindow.webContents.setZoomFactor(1);
@@ -2262,8 +2371,10 @@ const createBrowserWindow = ({ label, restoreGeometry, url, runtimeConfig = {}, 
     }
     browserWindow.webContents.setZoomFactor(1);
     if (state.mainWindow && browserWindow.id === state.mainWindow.id && pendingDeepLinks.length > 0) {
-      const timer = setTimeout(flushPendingDeepLinks, 400);
+      const timer = setTimeout(() => flushPendingDeepLinks({ includeSessions: false }), 400);
       if (typeof timer?.unref === 'function') timer.unref();
+      const lateTimer = setTimeout(() => flushPendingDeepLinks({ includeSessions: true }), PENDING_SESSION_LINK_FALLBACK_MS);
+      if (typeof lateTimer?.unref === 'function') lateTimer.unref();
     }
   });
 
@@ -2389,6 +2500,112 @@ const openMainWindow = async () => {
     ? (shouldUsePackagedUi() ? buildPackagedUiUrl('/index.html') : host.url)
     : localUiUrl;
   return activateMainWindow(targetUrl, state.localOrigin, state.bootOutcome, { apiBaseUrl, clientToken, requestHeaders });
+};
+
+// A session (and message) to open in a new window, from a link. IDs end up in
+// the window URL and the renderer's DOM selectors, so only plain identifier
+// characters pass.
+const SESSION_ROUTE_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+const parseSessionRoute = (rawSessionId, rawMessageId) => {
+  const sessionId = typeof rawSessionId === 'string' ? rawSessionId.trim() : '';
+  if (!SESSION_ROUTE_ID_RE.test(sessionId)) return null;
+  const messageId = typeof rawMessageId === 'string' ? rawMessageId.trim() : '';
+  return SESSION_ROUTE_ID_RE.test(messageId) ? { sessionId, messageId } : { sessionId };
+};
+
+const sessionRouteFromUrl = (raw) => {
+  try {
+    const url = new URL(raw);
+    return parseSessionRoute(url.searchParams.get('session'), url.searchParams.get('message'));
+  } catch {
+    return null;
+  }
+};
+
+// The window URL carries the route like the web does (`?session=&message=`);
+// the renderer's router opens it once the instance answers.
+const withSessionRoute = (windowUrl, route) => {
+  if (!route) return windowUrl;
+  try {
+    const url = new URL(windowUrl);
+    url.searchParams.set('session', route.sessionId);
+    if (route.messageId) url.searchParams.set('message', route.messageId);
+    return url.toString();
+  } catch {
+    return windowUrl;
+  }
+};
+
+// The configured desktop host a web address belongs to, if any.
+const findConfiguredHostForUrl = (raw) => {
+  let origin;
+  try {
+    origin = new URL(raw).origin;
+  } catch {
+    return null;
+  }
+  const hosts = readDesktopHostsConfig()?.hosts || [];
+  return hosts.find((entry) => [entry?.url, entry?.apiUrl].some((candidate) => {
+    if (typeof candidate !== 'string' || !candidate) return false;
+    try {
+      return new URL(candidate).origin === origin;
+    } catch {
+      return false;
+    }
+  })) || null;
+};
+
+// Opens a saved host in a new app window with its own credentials, optionally
+// on a session. Hosts with a relay leg boot the LOCAL UI and let the renderer
+// pick the transport (direct first, E2EE tunnel fallback) via the injected
+// relay host id — a fixed apiBaseUrl would strand the window when the direct
+// leg is unreachable.
+const openHostWindow = async (host, route = null, { reuseOpenWindow = false } = {}) => {
+  // A link to a host already open in a window lands in that window: brought
+  // to the front and moved to the session there, instead of one more window
+  // per click. "New window" from the switcher always opens one.
+  const existing = reuseOpenWindow
+    ? BrowserWindow.getAllWindows().find((window) => !window.isDestroyed() && window.__ocHostWindowId === host.id)
+    : null;
+  if (existing) {
+    if (existing.isMinimized()) existing.restore();
+    existing.show();
+    existing.focus();
+    if (!route) return;
+    // A window still booting has no listener yet; it reloads on the route.
+    if (existing.webContents.isLoading() && existing.__ocHostWindowBaseUrl) {
+      await navigateWindow(existing, withSessionRoute(existing.__ocHostWindowBaseUrl, route), { allowAbort: true });
+      return;
+    }
+    emitToWindow(existing, 'openchamber:open-session', route);
+    return;
+  }
+
+  let windowUrl;
+  let runtimeConfig;
+  if (host.relay) {
+    windowUrl = shouldUsePackagedUi() ? buildPackagedUiUrl('/index.html') : (state.sidecarUrl || state.localOrigin);
+    runtimeConfig = {
+      apiBaseUrl: '',
+      clientToken: host.clientToken || '',
+      requestHeaders: sanitizeRuntimeRequestHeaders(host.requestHeaders || {}),
+      relayHostId: host.id,
+    };
+  } else {
+    const targetUrl = normalizeHostUrl(host.apiUrl || host.url);
+    if (!targetUrl) throw new Error('Invalid URL');
+    windowUrl = shouldUsePackagedUi() ? buildPackagedUiUrl('/index.html') : targetUrl;
+    runtimeConfig = {
+      apiBaseUrl: targetUrl,
+      clientToken: host.clientToken || '',
+      requestHeaders: sanitizeRuntimeRequestHeaders(host.requestHeaders || {}),
+    };
+  }
+  const browserWindow = await createAdditionalWindow(withSessionRoute(windowUrl, route), runtimeConfig);
+  if (browserWindow) {
+    browserWindow.__ocHostWindowId = host.id;
+    browserWindow.__ocHostWindowBaseUrl = windowUrl;
+  }
 };
 
 const createAdditionalWindow = async (url, runtimeConfig = {}) => {
@@ -3525,6 +3742,13 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
       }
       return null;
 
+    case 'desktop_managed_opencode_compatible':
+      return canReuseManagedOpenCodePreflight({
+        apiBaseUrl: args.apiBaseUrl,
+        localOrigin: state.localOrigin,
+        server: state.serverHandle,
+      });
+
     case 'desktop_get_app_version':
       return APP_VERSION;
 
@@ -3612,7 +3836,7 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
 
       const client = await getDevTunnelClient();
       const result = await client.open({ baseUrl, port, headers });
-      return { localPort: result.localPort, reused: result.reused, url: `http://127.0.0.1:${result.localPort}/` };
+      return { localPort: result.localPort, reused: result.reused, url: `http://openchamber-preview.localhost:${result.localPort}/` };
     }
 
     case 'desktop_dev_tunnel_close': {
@@ -3893,6 +4117,13 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
       const parsed = new URL(target);
       if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
         throw new Error('Only HTTP URLs can be opened externally');
+      }
+
+      // A saved instance opens in the app, like the window.open path above.
+      const host = findConfiguredHostForUrl(parsed.toString());
+      if (host) {
+        await openHostWindow(host, sessionRouteFromUrl(parsed.toString()), { reuseOpenWindow: true });
+        return null;
       }
 
       await shell.openExternal(parsed.toString());
@@ -4245,6 +4476,19 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
         }
       }
       if (applyUpdate) {
+        // A previous restart click may still be installing: Squirrel accepts
+        // one quitAndInstall() per app session, so a second call throws
+        // SQRLUpdaterErrorInvalidState, and installDownloadedUpdate()'s
+        // fail() path would roll the quit state back while the first install
+        // is still in flight (#3670). updateInstallPending latches
+        // synchronously when the install starts and covers the backend-shutdown
+        // window; installingUpdate covers the tail after the installer has
+        // taken over the exit. A duplicate click joins the same restart
+        // instead of starting a second install.
+        if (state.updateInstallPending || state.installingUpdate) {
+          log.info('[electron] desktop_restart ignored, update install already in flight');
+          return null;
+        }
         // The quit/install flags belong to installDownloadedUpdate(), which
         // sets them once the backend is down and the installer is about to take
         // over. Setting them here left a window in which closing the last
@@ -4295,32 +4539,11 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
     }
 
     case 'desktop_new_window_for_host': {
-      // Open a saved host in a new window. Hosts with a relay leg boot the
-      // LOCAL UI and let the renderer pick the transport (direct first, E2EE
-      // tunnel fallback) via the injected relay host id — a fixed apiBaseUrl
-      // would strand the window when the direct leg is unreachable.
       const hostId = typeof args.hostId === 'string' ? args.hostId.trim() : '';
       const config = readDesktopHostsConfig();
       const host = config.hosts.find((entry) => entry.id === hostId);
       if (!host) throw new Error('Host not found');
-      if (host.relay) {
-        const windowUrl = shouldUsePackagedUi() ? buildPackagedUiUrl('/index.html') : (state.sidecarUrl || state.localOrigin);
-        await createAdditionalWindow(windowUrl, {
-          apiBaseUrl: '',
-          clientToken: host.clientToken || '',
-          requestHeaders: sanitizeRuntimeRequestHeaders(host.requestHeaders || {}),
-          relayHostId: host.id,
-        });
-        return null;
-      }
-      const targetUrl = normalizeHostUrl(host.apiUrl || host.url);
-      if (!targetUrl) throw new Error('Invalid URL');
-      const windowUrl = shouldUsePackagedUi() ? buildPackagedUiUrl('/index.html') : targetUrl;
-      await createAdditionalWindow(windowUrl, {
-        apiBaseUrl: targetUrl,
-        clientToken: host.clientToken || '',
-        requestHeaders: sanitizeRuntimeRequestHeaders(host.requestHeaders || {}),
-      });
+      await openHostWindow(host);
       return null;
     }
 
@@ -4362,6 +4585,11 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
 
     case 'desktop_get_window_pinned':
       return { pinned: Boolean(browserWindow?.__ocPinned) };
+
+    case 'desktop_take_pending_session_links':
+      // Session links open in the main window only.
+      if (!browserWindow || !state.mainWindow || browserWindow.id !== state.mainWindow.id) return [];
+      return takePendingSessionDeepLinks();
 
     case 'desktop_focus_main_window': {
       const sessionId = typeof args.sessionId === 'string' ? args.sessionId.trim() : '';
@@ -4421,12 +4649,23 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
     case 'desktop_get_current_window_state':
       return { maximized: Boolean(browserWindow && !browserWindow.isDestroyed() && browserWindow.isMaximized()) };
 
+    case 'desktop_set_locale': {
+      if (typeof args.locale === 'string') {
+        setContextMenuLocale(args.locale);
+        if (process.platform === 'darwin') {
+          Menu.setApplicationMenu(buildMacMenu(normalizeMenuLocale(args.locale)));
+        }
+      }
+      return null;
+    }
+
     case 'desktop_show_app_menu': {
       if (!browserWindow || browserWindow.isDestroyed()) {
         return null;
       }
 
-      const menu = Menu.getApplicationMenu() || buildAutoHiddenMenu();
+      const locale = typeof args.locale === 'string' ? args.locale : 'en';
+      const menu = buildAutoHiddenMenu(locale);
       const x = Number.isFinite(Number(args.x)) ? Math.max(0, Math.round(Number(args.x))) : undefined;
       const y = Number.isFinite(Number(args.y)) ? Math.max(0, Math.round(Number(args.y))) : undefined;
       menu.popup({ window: browserWindow, x, y });
@@ -4472,8 +4711,10 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
   }
 };
 
-const buildMacMenu = () => {
+const buildMacMenu = (locale = 'en') => {
   const dispatchAction = (action) => dispatchMenuAction(action);
+  const t = (key) => menuLabel(locale, key);
+  const roleItem = (role, key) => roleMenuItem(locale, role, key);
   const handleCopyAction = () => {
     BrowserWindow.getFocusedWindow()?.webContents.copy();
     dispatchAction('copy');
@@ -4481,109 +4722,111 @@ const buildMacMenu = () => {
 
   return Menu.buildFromTemplate([
     {
-      label: app.name,
+      label: t('app.name'),
       submenu: [
-        { label: 'About OpenChamber', click: () => dispatchAction('about') },
+        { label: t('about'), click: () => dispatchAction('about') },
         {
-          label: 'Check for Updates',
+          label: t('checkForUpdates'),
           click: () => dispatchCheckForUpdates(),
         },
         { type: 'separator' },
-        { label: 'Settings', accelerator: 'Cmd+,', click: () => dispatchAction('settings') },
-        { label: 'Reload Webview', click: () => reloadMenuTargetWindow() },
-        { label: 'Restart', click: () => relaunchFromMenu() },
-        { label: 'Command Palette', accelerator: 'Cmd+P', click: () => dispatchAction('command-palette') },
+        { label: t('settings'), accelerator: 'Cmd+,', click: () => dispatchAction('settings') },
+        { label: t('reloadWebview'), click: () => reloadMenuTargetWindow() },
+        { label: t('restart'), click: () => relaunchFromMenu() },
+        { label: t('commandPalette'), accelerator: 'Cmd+P', click: () => dispatchAction('command-palette') },
         { type: 'separator' },
-        { role: 'services' },
+        roleItem('services', 'services'),
         { type: 'separator' },
-        { role: 'hide' },
-        { role: 'hideOthers' },
+        roleItem('hide', 'hide'),
+        roleItem('hideOthers', 'hideOthers'),
         { type: 'separator' },
-        { role: 'quit' },
+        roleItem('quit', 'quit'),
       ],
     },
     {
-      label: 'File',
+      label: t('file'),
       submenu: [
-        { label: 'New Window', accelerator: 'Cmd+Shift+Alt+N', click: () => void handleInvoke(null, 'desktop_new_window') },
+        { label: t('newWindow'), accelerator: 'Cmd+Shift+Alt+N', click: () => void handleInvoke(null, 'desktop_new_window') },
         { type: 'separator' },
-        { label: 'New Session', accelerator: 'Cmd+N', click: () => dispatchAction('new-session') },
-        { label: 'New Worktree', accelerator: 'Cmd+Shift+N', click: () => dispatchAction('new-worktree-session') },
+        { label: t('newSession'), accelerator: 'Cmd+N', click: () => dispatchAction('new-session') },
+        { label: t('newWorktree'), accelerator: 'Cmd+Shift+N', click: () => dispatchAction('new-worktree-session') },
         // registerAccelerator:false → show the shortcut hint but let the
         // renderer own the (customizable) key binding, avoiding a double open.
-        { label: 'New Mini Chat', accelerator: 'Cmd+Alt+N', registerAccelerator: false, click: () => dispatchOpenMiniChat() },
+        { label: t('newMiniChat'), accelerator: 'Cmd+Alt+N', registerAccelerator: false, click: () => dispatchOpenMiniChat() },
         { type: 'separator' },
-        { label: 'Add Workspace', click: () => dispatchAction('change-workspace') },
+        { label: t('addWorkspace'), click: () => dispatchAction('change-workspace') },
         { type: 'separator' },
-        { role: 'close' },
+        roleItem('close', 'close'),
       ],
     },
     {
-      label: 'Edit',
+      label: t('edit'),
       submenu: [
-        { role: 'undo' },
-        { role: 'redo' },
+        roleItem('undo', 'undo'),
+        roleItem('redo', 'redo'),
         { type: 'separator' },
-        { role: 'cut' },
-        { label: 'Copy', accelerator: 'Cmd+C', click: () => handleCopyAction() },
-        { label: 'Add Selection to Chat', accelerator: 'Cmd+L', registerAccelerator: false, click: () => dispatchAddSelectionToChat() },
-        { role: 'paste' },
-        { role: 'selectAll' },
+        roleItem('cut', 'cut'),
+        { label: t('copy'), accelerator: 'Cmd+C', click: () => handleCopyAction() },
+        { label: t('addSelectionToChat'), accelerator: 'Cmd+L', registerAccelerator: false, click: () => dispatchAddSelectionToChat() },
+        roleItem('paste', 'paste'),
+        roleItem('selectAll', 'selectAll'),
       ],
     },
     {
-      label: 'View',
+      label: t('view'),
       submenu: [
-        { label: 'Toggle Right Sidebar', accelerator: 'Cmd+B', click: () => dispatchAction('toggle-right-sidebar') },
-        { label: 'Open Git Sidebar', accelerator: 'Cmd+Shift+G', click: () => dispatchAction('open-right-sidebar-git') },
-        { label: 'Open Files Sidebar', accelerator: 'Cmd+Shift+F', click: () => dispatchAction('open-right-sidebar-files') },
+        { label: t('toggleRightSidebar'), accelerator: 'Cmd+B', click: () => dispatchAction('toggle-right-sidebar') },
+        { label: t('openGitSidebar'), accelerator: 'Cmd+Shift+G', click: () => dispatchAction('open-right-sidebar-git') },
+        { label: t('openFilesSidebar'), accelerator: 'Cmd+Shift+F', click: () => dispatchAction('open-right-sidebar-files') },
         { type: 'separator' },
-        { label: 'Toggle Terminal Dock', accelerator: 'Cmd+J', click: () => dispatchAction('toggle-terminal') },
-        { label: 'Toggle Terminal Expanded', accelerator: 'Cmd+Shift+J', click: () => dispatchAction('toggle-terminal-expanded') },
+        { label: t('toggleTerminalDock'), accelerator: 'Cmd+J', click: () => dispatchAction('toggle-terminal') },
+        { label: t('toggleTerminalExpanded'), accelerator: 'Cmd+Shift+J', click: () => dispatchAction('toggle-terminal-expanded') },
         { type: 'separator' },
-        { label: 'Light Theme', click: () => dispatchAction('theme-light') },
-        { label: 'Dark Theme', click: () => dispatchAction('theme-dark') },
-        { label: 'System Theme', click: () => dispatchAction('theme-system') },
+        { label: t('lightTheme'), click: () => dispatchAction('theme-light') },
+        { label: t('darkTheme'), click: () => dispatchAction('theme-dark') },
+        { label: t('systemTheme'), click: () => dispatchAction('theme-system') },
         { type: 'separator' },
-        { label: 'Toggle Session Sidebar', accelerator: 'Cmd+Alt+L', click: () => dispatchAction('toggle-sidebar') },
-        { label: 'Toggle Memory Debug', accelerator: 'Cmd+Shift+D', click: () => dispatchAction('toggle-memory-debug') },
+        { label: t('toggleSessionSidebar'), accelerator: 'Cmd+Alt+L', click: () => dispatchAction('toggle-sidebar') },
+        { label: t('toggleMemoryDebug'), accelerator: 'Cmd+Shift+D', click: () => dispatchAction('toggle-memory-debug') },
         { type: 'separator' },
-        { role: 'togglefullscreen' },
+        roleItem('togglefullscreen', 'toggleFullScreen'),
       ],
     },
     {
-      label: 'Window',
+      label: t('window'),
       submenu: [
-        { role: 'minimize' },
-        { role: 'zoom' },
+        roleItem('minimize', 'minimize'),
+        roleItem('zoom', 'zoom'),
         { type: 'separator' },
-        { label: 'Zoom In', accelerator: 'CmdOrCtrl+=', click: () => dispatchAction('zoom-in') },
-        { label: 'Zoom Out', accelerator: 'CmdOrCtrl+-', click: () => dispatchAction('zoom-out') },
-        { label: 'Reset Zoom', accelerator: 'CmdOrCtrl+0', click: () => dispatchAction('zoom-reset') },
+        { label: t('zoomIn'), accelerator: 'CmdOrCtrl+=', click: () => dispatchAction('zoom-in') },
+        { label: t('zoomOut'), accelerator: 'CmdOrCtrl+-', click: () => dispatchAction('zoom-out') },
+        { label: t('resetZoom'), accelerator: 'CmdOrCtrl+0', click: () => dispatchAction('zoom-reset') },
         { type: 'separator' },
-        { role: 'close' },
+        roleItem('close', 'close'),
       ],
     },
     {
-      label: 'Help',
+      label: t('help'),
       submenu: [
-        { label: 'Keyboard Shortcuts', accelerator: 'Cmd+.', click: () => dispatchAction('help-dialog') },
-        { label: 'Show Diagnostics', accelerator: 'Cmd+Shift+L', click: () => dispatchAction('download-logs') },
-        { label: 'Toggle Developer Tools', accelerator: 'Cmd+Alt+I', click: () => openDevToolsForMenuTarget() },
+        { label: t('keyboardShortcuts'), accelerator: 'Cmd+.', click: () => dispatchAction('help-dialog') },
+        { label: t('showDiagnostics'), accelerator: 'Cmd+Shift+L', click: () => dispatchAction('download-logs') },
+        { label: t('toggleDeveloperTools'), accelerator: 'Cmd+Alt+I', click: () => openDevToolsForMenuTarget() },
         { type: 'separator' },
-        { label: 'Clear Cache', click: () => void handleInvoke(null, 'desktop_clear_cache') },
+        { label: t('clearCache'), click: () => void handleInvoke(null, 'desktop_clear_cache') },
         { type: 'separator' },
-        { label: 'Report a Bug', click: () => shell.openExternal(GITHUB_BUG_REPORT_URL) },
-        { label: 'Discuss an Idea', click: () => shell.openExternal(GITHUB_IDEAS_URL) },
+        { label: t('reportABug'), click: () => shell.openExternal(GITHUB_BUG_REPORT_URL) },
+        { label: t('discussAnIdea'), click: () => shell.openExternal(GITHUB_IDEAS_URL) },
         { type: 'separator' },
-        { label: 'Join Discord', click: () => shell.openExternal(DISCORD_INVITE_URL) },
+        { label: t('joinDiscord'), click: () => shell.openExternal(DISCORD_INVITE_URL) },
       ],
     },
   ]);
 };
 
-const buildAutoHiddenMenu = () => {
+const buildAutoHiddenMenu = (locale = 'en') => {
   const dispatchAction = (action) => dispatchMenuAction(action);
+  const t = (key) => menuLabel(locale, key);
+  const roleItem = (role, key) => roleMenuItem(locale, role, key);
   const handleCopyAction = () => {
     BrowserWindow.getFocusedWindow()?.webContents.copy();
     dispatchAction('copy');
@@ -4591,115 +4834,118 @@ const buildAutoHiddenMenu = () => {
 
   return Menu.buildFromTemplate([
     {
-      label: 'OpenChamber',
+      label: t('app.name'),
       submenu: [
-        { label: 'About OpenChamber', click: () => dispatchAction('about') },
+        { label: t('about'), click: () => dispatchAction('about') },
         {
-          label: 'Check for Updates',
+          label: t('checkForUpdates'),
           click: () => dispatchCheckForUpdates(),
         },
         { type: 'separator' },
-        { label: 'Settings', accelerator: 'Ctrl+,', click: () => dispatchAction('settings') },
-        { label: 'Reload Webview', click: () => reloadMenuTargetWindow() },
-        { label: 'Restart', click: () => relaunchFromMenu() },
-        { label: 'Command Palette', accelerator: 'Ctrl+P', click: () => dispatchAction('command-palette') },
+        { label: t('settings'), accelerator: 'Ctrl+,', click: () => dispatchAction('settings') },
+        { label: t('reloadWebview'), click: () => reloadMenuTargetWindow() },
+        { label: t('restart'), click: () => relaunchFromMenu() },
+        { label: t('commandPalette'), accelerator: 'Ctrl+P', click: () => dispatchAction('command-palette') },
         { type: 'separator' },
-        { role: 'quit' },
+        roleItem('quit', 'quit'),
       ],
     },
     {
-      label: 'File',
+      label: t('file'),
       submenu: [
-        { label: 'New Window', accelerator: 'Ctrl+Shift+Alt+N', click: () => void handleInvoke(null, 'desktop_new_window') },
+        { label: t('newWindow'), accelerator: 'Ctrl+Shift+Alt+N', click: () => void handleInvoke(null, 'desktop_new_window') },
         { type: 'separator' },
-        { label: 'New Session', accelerator: 'Ctrl+N', click: () => dispatchAction('new-session') },
-        { label: 'New Worktree', accelerator: 'Ctrl+Shift+N', click: () => dispatchAction('new-worktree-session') },
+        { label: t('newSession'), accelerator: 'Ctrl+N', click: () => dispatchAction('new-session') },
+        { label: t('newWorktree'), accelerator: 'Ctrl+Shift+N', click: () => dispatchAction('new-worktree-session') },
         { type: 'separator' },
-        { label: 'Add Workspace', click: () => dispatchAction('change-workspace') },
+        { label: t('addWorkspace'), click: () => dispatchAction('change-workspace') },
         { type: 'separator' },
-        { role: 'quit' },
+        roleItem('quit', 'quit'),
       ],
     },
     {
-      label: 'Edit',
+      label: t('edit'),
       submenu: [
-        { role: 'undo' },
-        { role: 'redo' },
+        roleItem('undo', 'undo'),
+        roleItem('redo', 'redo'),
         { type: 'separator' },
-        { role: 'cut' },
-        { label: 'Copy', accelerator: 'Ctrl+C', click: () => handleCopyAction() },
-        { label: 'Add Selection to Chat', accelerator: 'Ctrl+L', registerAccelerator: false, click: () => dispatchAddSelectionToChat() },
-        { role: 'paste' },
-        { role: 'selectAll' },
+        roleItem('cut', 'cut'),
+        { label: t('copy'), accelerator: 'Ctrl+C', click: () => handleCopyAction() },
+        { label: t('addSelectionToChat'), accelerator: 'Ctrl+L', registerAccelerator: false, click: () => dispatchAddSelectionToChat() },
+        roleItem('paste', 'paste'),
+        roleItem('selectAll', 'selectAll'),
       ],
     },
     {
-      label: 'View',
+      label: t('view'),
       submenu: [
-        { role: 'reload' },
-        { role: 'forceReload' },
-        { label: 'Toggle Developer Tools', accelerator: 'Ctrl+Alt+I', click: () => openDevToolsForMenuTarget() },
+        roleItem('reload', 'reload'),
+        roleItem('forceReload', 'forceReload'),
+        { label: t('toggleDeveloperTools'), accelerator: 'Ctrl+Alt+I', click: () => openDevToolsForMenuTarget() },
         { type: 'separator' },
-        { label: 'Toggle Right Sidebar', accelerator: 'Ctrl+B', click: () => dispatchAction('toggle-right-sidebar') },
-        { label: 'Open Git Sidebar', accelerator: 'Ctrl+Shift+G', click: () => dispatchAction('open-right-sidebar-git') },
-        { label: 'Open Files Sidebar', accelerator: 'Ctrl+Shift+F', click: () => dispatchAction('open-right-sidebar-files') },
+        { label: t('toggleRightSidebar'), accelerator: 'Ctrl+B', click: () => dispatchAction('toggle-right-sidebar') },
+        { label: t('openGitSidebar'), accelerator: 'Ctrl+Shift+G', click: () => dispatchAction('open-right-sidebar-git') },
+        { label: t('openFilesSidebar'), accelerator: 'Ctrl+Shift+F', click: () => dispatchAction('open-right-sidebar-files') },
         { type: 'separator' },
-        { label: 'Toggle Terminal Dock', accelerator: 'Ctrl+J', click: () => dispatchAction('toggle-terminal') },
-        { label: 'Toggle Terminal Expanded', accelerator: 'Ctrl+Shift+J', click: () => dispatchAction('toggle-terminal-expanded') },
+        { label: t('toggleTerminalDock'), accelerator: 'Ctrl+J', click: () => dispatchAction('toggle-terminal') },
+        { label: t('toggleTerminalExpanded'), accelerator: 'Ctrl+Shift+J', click: () => dispatchAction('toggle-terminal-expanded') },
         { type: 'separator' },
-        { label: 'Light Theme', click: () => dispatchAction('theme-light') },
-        { label: 'Dark Theme', click: () => dispatchAction('theme-dark') },
-        { label: 'System Theme', click: () => dispatchAction('theme-system') },
+        { label: t('lightTheme'), click: () => dispatchAction('theme-light') },
+        { label: t('darkTheme'), click: () => dispatchAction('theme-dark') },
+        { label: t('systemTheme'), click: () => dispatchAction('theme-system') },
         { type: 'separator' },
-        { label: 'Toggle Session Sidebar', accelerator: 'Ctrl+Alt+L', click: () => dispatchAction('toggle-sidebar') },
-        { label: 'Toggle Memory Debug', accelerator: 'Ctrl+Shift+D', click: () => dispatchAction('toggle-memory-debug') },
+        { label: t('toggleSessionSidebar'), accelerator: 'Ctrl+Alt+L', click: () => dispatchAction('toggle-sidebar') },
+        { label: t('toggleMemoryDebug'), accelerator: 'Ctrl+Shift+D', click: () => dispatchAction('toggle-memory-debug') },
         { type: 'separator' },
-        { role: 'togglefullscreen' },
+        roleItem('togglefullscreen', 'toggleFullScreen'),
       ],
     },
     {
-      label: 'Go',
+      label: t('go'),
       submenu: [
-        { label: 'Back', accelerator: 'Ctrl+[', click: () => dispatchAction('go-back') },
-        { label: 'Forward', accelerator: 'Ctrl+]', click: () => dispatchAction('go-forward') },
+        { label: t('back'), accelerator: 'Ctrl+[', click: () => dispatchAction('go-back') },
+        { label: t('forward'), accelerator: 'Ctrl+]', click: () => dispatchAction('go-forward') },
         { type: 'separator' },
-        { label: 'Previous Session', accelerator: 'Alt+Up', click: () => dispatchAction('previous-session') },
-        { label: 'Next Session', accelerator: 'Alt+Down', click: () => dispatchAction('next-session') },
+        { label: t('previousSession'), accelerator: 'Alt+Up', click: () => dispatchAction('previous-session') },
+        { label: t('nextSession'), accelerator: 'Alt+Down', click: () => dispatchAction('next-session') },
         { type: 'separator' },
-        { label: 'Previous Project', accelerator: 'Ctrl+Alt+Up', click: () => dispatchAction('previous-project') },
-        { label: 'Next Project', accelerator: 'Ctrl+Alt+Down', click: () => dispatchAction('next-project') },
+        { label: t('previousProject'), accelerator: 'Ctrl+Alt+Up', click: () => dispatchAction('previous-project') },
+        { label: t('nextProject'), accelerator: 'Ctrl+Alt+Down', click: () => dispatchAction('next-project') },
       ],
     },
     {
-      label: 'Window',
+      label: t('window'),
       submenu: [
-        { role: 'minimize' },
-        { label: 'Zoom In', accelerator: 'Ctrl+=', click: () => dispatchAction('zoom-in') },
-        { label: 'Zoom Out', accelerator: 'Ctrl+-', click: () => dispatchAction('zoom-out') },
-        { label: 'Reset Zoom', accelerator: 'Ctrl+0', click: () => dispatchAction('zoom-reset') },
-        { role: 'togglefullscreen' },
+        roleItem('minimize', 'minimize'),
+        { label: t('zoomIn'), accelerator: 'Ctrl+=', click: () => dispatchAction('zoom-in') },
+        { label: t('zoomOut'), accelerator: 'Ctrl+-', click: () => dispatchAction('zoom-out') },
+        { label: t('resetZoom'), accelerator: 'Ctrl+0', click: () => dispatchAction('zoom-reset') },
+        roleItem('togglefullscreen', 'toggleFullScreen'),
         { type: 'separator' },
-        { role: 'close' },
+        roleItem('close', 'close'),
       ],
     },
     {
-      label: 'Help',
+      label: t('help'),
       submenu: [
-        { label: 'Keyboard Shortcuts', accelerator: 'Ctrl+.', click: () => dispatchAction('help-dialog') },
-        { label: 'Show Diagnostics', accelerator: 'Ctrl+Shift+L', click: () => dispatchAction('download-logs') },
+        { label: t('keyboardShortcuts'), accelerator: 'Ctrl+.', click: () => dispatchAction('help-dialog') },
+        { label: t('showDiagnostics'), accelerator: 'Ctrl+Shift+L', click: () => dispatchAction('download-logs') },
         { type: 'separator' },
-        { label: 'Clear Cache', click: () => void handleInvoke(null, 'desktop_clear_cache') },
+        { label: t('clearCache'), click: () => void handleInvoke(null, 'desktop_clear_cache') },
         { type: 'separator' },
-        { label: 'Report a Bug', click: () => shell.openExternal(GITHUB_BUG_REPORT_URL) },
-        { label: 'Discuss an Idea', click: () => shell.openExternal(GITHUB_IDEAS_URL) },
+        { label: t('reportABug'), click: () => shell.openExternal(GITHUB_BUG_REPORT_URL) },
+        { label: t('discussAnIdea'), click: () => shell.openExternal(GITHUB_IDEAS_URL) },
         { type: 'separator' },
-        { label: 'Join Discord', click: () => shell.openExternal(DISCORD_INVITE_URL) },
+        { label: t('joinDiscord'), click: () => shell.openExternal(DISCORD_INVITE_URL) },
       ],
     },
   ]);
 };
 
+const { labels: contextMenuLabels, apply: setContextMenuLocale } = createContextMenuLabels();
+
 contextMenu({
+  labels: contextMenuLabels,
   showInspectElement: isDev,
   showSaveImageAs: true,
   showCopyImage: true,

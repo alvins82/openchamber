@@ -5,6 +5,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 
 import { createOpenChamberControlService } from './service.js';
+import { OpenChamberControlError } from './error.js';
 
 const createService = (overrides = {}) => {
   const client = {
@@ -18,6 +19,10 @@ const createService = (overrides = {}) => {
   };
   const sessionService = {
     create: vi.fn(async () => ({ sessionId: 'ses_1', directory: '/repo', promptDispatched: false })),
+    resolveDirectory: vi.fn(async ({ projectId }) => {
+      if (projectId === 'project-1') return '/repo';
+      throw new OpenChamberControlError('Project not found', 404);
+    }),
     send: vi.fn(),
     fork: vi.fn(),
   };
@@ -228,6 +233,51 @@ describe('OpenChamber control service', () => {
     });
   });
 
+  it('scopes session reads to an explicit project instead of the tool context directory', async () => {
+    const { service, client, sessionService } = createService();
+    client.session.list.mockResolvedValue({ data: [{ id: 'ses_repo', location: { directory: '/repo' }, time: {} }] });
+
+    await expect(service.execute('session.list', { projectId: ' project-1 ' }, '/current-session')).resolves.toEqual(
+      expect.objectContaining({ directory: '/repo', sessions: [{ id: 'ses_repo', location: { directory: '/repo' }, time: {} }] }),
+    );
+    expect(sessionService.resolveDirectory).toHaveBeenCalledWith({ projectId: 'project-1' });
+    expect(client.session.list).toHaveBeenCalledWith({ directory: '/repo' });
+
+    await expect(service.execute('session.status', { projectId: 'project-1', sessionId: 'ses_repo' }, '/current-session'))
+      .resolves.toEqual({ sessionId: 'ses_repo', directory: '/repo', sessionStatus: { type: 'idle' } });
+  });
+
+  it('rejects an unknown project instead of reading another directory', async () => {
+    const { service, client } = createService();
+    await expect(service.execute('session.list', { projectId: 'missing' }, '/current-session'))
+      .rejects.toMatchObject({ statusCode: 404, message: 'Project not found' });
+    await expect(service.execute('session.list', { projectId: 'missing' }))
+      .rejects.toMatchObject({ statusCode: 404 });
+    await expect(service.execute('session.messages', { projectId: 'missing', sessionId: 'ses_1' }, '/current-session'))
+      .rejects.toMatchObject({ statusCode: 404 });
+    expect(client.session.list).not.toHaveBeenCalled();
+    expect(client.message.list).not.toHaveBeenCalled();
+  });
+
+  it('asks for sessionId before looking up the project', async () => {
+    const { service, sessionService } = createService();
+    await expect(service.execute('session.status', { projectId: 'missing' }, '/current-session'))
+      .rejects.toMatchObject({ statusCode: 400, message: 'sessionId is required' });
+    expect(sessionService.resolveDirectory).not.toHaveBeenCalled();
+  });
+
+  it('rejects any session action scoped by both projectId and directory', async () => {
+    const { service, client, sessionService } = createService();
+    for (const action of ['session.list', 'session.status', 'session.create', 'session.send', 'session.fork']) {
+      await expect(service.execute(action, { projectId: 'project-1', directory: '/other', sessionId: 'ses_1', prompt: 'hi' }))
+        .rejects.toMatchObject({ statusCode: 400, message: 'Provide only one of projectId or directory' });
+    }
+    expect(client.session.list).not.toHaveBeenCalled();
+    expect(sessionService.create).not.toHaveBeenCalled();
+    expect(sessionService.send).not.toHaveBeenCalled();
+    expect(sessionService.fork).not.toHaveBeenCalled();
+  });
+
   it('names limit in positive-integer validation errors', async () => {
     const { service, client } = createService();
     await expect(service.execute('session.list', { limit: 0 })).rejects.toThrow('limit must be a positive integer');
@@ -294,6 +344,31 @@ describe('file.open', () => {
   });
 });
 
+describe('notify.send', () => {
+  it('sends the notice for the calling session and returns what was delivered', async () => {
+    const notifyUser = vi.fn(async () => ({ status: 200, body: { delivered: true } }));
+    const { service } = createService({ notifyUser });
+
+    const result = await service.execute('notify.send', { title: 'Done', body: 'All green', showWhenFocused: true }, '/repo', { contextSessionId: 'ses_1' });
+
+    expect(notifyUser).toHaveBeenCalledWith({ title: 'Done', body: 'All green', showWhenFocused: true, sessionId: 'ses_1', directory: '/repo' });
+    expect(result).toEqual({ delivered: true });
+  });
+
+  it('turns a refused notice into an error the agent can read', async () => {
+    const notifyUser = vi.fn(async () => ({ status: 429, retryAfter: 4, body: { error: 'too many notifications' } }));
+    const { service } = createService({ notifyUser });
+
+    await expect(service.execute('notify.send', { title: 'Done' }, '/repo'))
+      .rejects.toMatchObject({ statusCode: 429, message: 'too many notifications' });
+  });
+
+  it('answers 503 when this server has no notifier wired', async () => {
+    const { service } = createService({});
+    await expect(service.execute('notify.send', { title: 'Done' }, '/repo')).rejects.toMatchObject({ statusCode: 503 });
+  });
+});
+
 describe('browser capture', () => {
   const pixel = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 
@@ -336,6 +411,12 @@ describe('browser capture', () => {
   it('refuses to capture with no project to save into', async () => {
     const { service } = await createBrowserService({ base64: pixel, mime: 'image/png' });
     await expect(service.execute('browser.capture', {})).rejects.toThrow(/directory is required/);
+  });
+
+  it('passes the tab the agent named to the browser', async () => {
+    const { service, directory, request } = await createBrowserService({ base64: pixel, mime: 'image/png' });
+    await service.execute('browser.capture', { tabId: ' tab-2 ' }, directory);
+    expect(request).toHaveBeenCalledWith('browser.capture', { tabId: 'tab-2' }, expect.anything());
   });
 
   it('passes a label through to the browser and leaves other actions untouched', async () => {

@@ -11,8 +11,13 @@ the user can want independently:
   `agentControlToolEnabled` setting is not `false`.
 - `openchamber_web` — looking at and interacting with the page in OpenChamber's
   browser panel. Enabled while `agentWebToolEnabled` is not `false`.
+- `openchamber_notify` — `notify.send`, a notification to the user through
+  `lib/notifications/emit-route.js` (same limits and rate window as
+  `POST /api/notifications/emit`). Off by default: enabled only while
+  `agentNotifyToolEnabled` is `true`, and the control service refuses the
+  action when the setting is off, so a stale plugin cannot keep paging.
 
-Both default to on, are toggled in Settings → General → OpenCode CLI, and take
+Both default to on, are toggled in Settings → General → OpenChamber Tools, and take
 effect in the running OpenCode within a couple of seconds — OpenChamber rewrites
 the managed config file OpenCode watches (see
 `lib/opencode/managed-config-file.js`). Installs where the user's own
@@ -23,6 +28,13 @@ from the schema rather than leaving them visible. The plugin is injected only
 when OpenChamber launches and owns the OpenCode process, and not at all when
 both settings are `false`.
 
+- Every tool is registered with `options: { codemode: false }`, so it is a
+  direct tool in the model's tool list. OpenCode 2 otherwise puts plugin tools
+  behind its Code Mode `execute` tool, where the model sees only a
+  size-limited catalog; with a few large MCP servers ours dropped out of it and
+  agents concluded the tool did not exist. `agentToolsCodeMode: true` (the
+  "Run through Code Mode" checkbox in the same section, off by default) flips
+  all of them to `codemode: true`.
 - The plugin accepts the action's inputs either inside `parameters` or beside
   `action`, because models produce both shapes; an explicit `parameters` object
   wins on a conflict. Rejecting the flattened shape turned a call that plainly
@@ -72,11 +84,23 @@ both settings are `false`.
   `schedule.list` already returns scheduler status, and enable/disable are one
   `schedule.toggle` action driven by the `disabled` boolean.
 - The tool description frames intent: created sessions and scheduled tasks are
-  user-facing work the user follows up with, never a channel for the agent to
-  delegate parts of its own current task.
+  user-facing work the user follows up with. The agent must not decide on its
+  own to delegate parts of its current task, but an explicit user request to
+  create, send, or schedule always wins, even when it relates to the current
+  task (strict models otherwise read the old unconditional "never delegate" as
+  a hard ban and refused user-requested sends).
 - Optional behavior switches (`worktree`, `goal`, `agent`, `variant`, `wait`)
   state their default and an explicit "only when the user asks" rule so agents
   do not invent worktrees, goal mode, or waits the user never requested.
+- A rule about when to act belongs where the model reads it before choosing a
+  tool: the head of the tool description and, when it must hold in every
+  session, the session context (`../session-knowledge/`). An action's
+  description is read only after the tool was chosen, so a trigger placed
+  there is missed by an agent that never thought the tool applied. Seen with
+  `session.link`: told only in the action, an agent investigating an issue
+  never linked it; with the rule at the head of the description and in the
+  session context, the next agent linked the issue first thing (2026-10-02).
+  Action descriptions say what the action does and takes.
 - Detailed combination rules are enforced by the shared control service and
   returned as actionable usage errors only after an invalid call. Per-action
   examples and a repeated per-action parameter schema are intentionally omitted.

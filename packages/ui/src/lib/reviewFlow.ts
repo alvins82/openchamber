@@ -18,9 +18,10 @@ import { usePermissionStore } from '@/stores/permissionStore';
 import { optimisticSend, patchSessionMetadata, waitForConnectionOrThrow } from '@/sync/session-actions';
 import { useSelectionStore } from '@/sync/selection-store';
 import { resolveSendSelection, useSessionUIStore } from '@/sync/session-ui-store';
-import { getSyncMessages, getSyncParts, getSyncSessionStatus, registerSessionDirectory } from '@/sync/sync-refs';
+import { getSyncMessages, getSyncParts, getSyncSessionStatus, getSyncSessions, registerSessionDirectory } from '@/sync/sync-refs';
 import { markPendingUserSendAnimation } from '@/lib/userSendAnimation';
 import { getRuntimeKey } from '@/lib/runtime-switch';
+import { fetchSessionKnowledge, reportSessionKnowledgeDelivered } from '@/lib/sessionKnowledgeApi';
 
 const HANDOFF_TIMEOUT_MS = 180_000;
 const HANDOFF_POLL_MS = 400;
@@ -107,9 +108,20 @@ const getLatestAssistantTextMessage = (
   return null;
 };
 
+/**
+ * The turn is over only when the session is idle and none of its subagents is
+ * still running. A parent goes idle while a background subagent works; OpenCode
+ * then hands the result back and the parent runs again, so the reply it left
+ * at that pause is not the finished work. Child statuses come from the same
+ * live directory store as the parent's.
+ */
 const isSessionIdle = (sessionID: string, directory: string): boolean => {
-  const status = getSyncSessionStatus(sessionID, directory);
-  return status?.type === 'idle';
+  if (getSyncSessionStatus(sessionID, directory)?.type !== 'idle') return false;
+  return !getSyncSessions(directory).some((session) => {
+    if (session.parentID !== sessionID) return false;
+    const childStatus = getSyncSessionStatus(session.id, directory);
+    return childStatus !== undefined && childStatus.type !== 'idle';
+  });
 };
 
 export const isAutoReviewRuntimeCurrent = (runtimeKey: string): boolean => runtimeKey === getRuntimeKey();
@@ -284,6 +296,12 @@ export const resumeAutoReviewRun = (originalSessionID: string): void => {
 const waitForAssistantText = async (sessionID: string, directory: string, afterCreatedAt: number): Promise<string> => {
   const deadline = Date.now() + HANDOFF_TIMEOUT_MS;
   while (Date.now() < deadline) {
+    // v2 completes every step, and a step that says "let me check" before a
+    // tool call has text too. Only the finished turn holds the handoff.
+    if (!isSessionIdle(sessionID, directory)) {
+      await new Promise((resolve) => setTimeout(resolve, HANDOFF_POLL_MS));
+      continue;
+    }
     const messages = getSyncMessages(sessionID, directory);
     const candidates = messages
       .filter((message) => getMessageRole(message) === 'assistant')
@@ -357,18 +375,24 @@ const sendPlainMessage = async (
     selection.saveAgentModelForSession(sessionID, resolved.agent, resolved.providerID, resolved.modelID);
     selection.saveAgentModelVariantForSession(sessionID, resolved.agent, resolved.providerID, resolved.modelID, resolved.variant);
   }
+  // Review sessions are real work sessions, so they carry the project's
+  // standing context (pinned notes, memory) exactly as a composer send would.
+  const knowledge = await fetchSessionKnowledge(directory, sessionID);
+  assertAutoReviewRuntimeStillCurrent(expectedRuntimeKey);
+  const sendContext = knowledge.text ? [{ text: knowledge.text }, ...(context ?? [])] : context;
   markPendingUserSendAnimation(sessionID);
   let sentMessageID: string | null = null;
   await optimisticSend({
     sessionId: sessionID,
     content: text,
     directory,
+    context: sendContext,
     onMessageID: (messageID) => {
       sentMessageID = messageID;
     },
     beforeOptimisticInsert: () => assertAutoReviewRuntimeStillCurrent(expectedRuntimeKey),
     onOptimisticInsert: () => requestChatForceScrollBottom(sessionID),
-    send: (messageID) => {
+    send: (messageID, context) => {
       assertAutoReviewRuntimeStillCurrent(expectedRuntimeKey);
       // Only a genuine change travels with the prompt; the review session was
       // created on this selection, so normally nothing is switched.
@@ -386,6 +410,9 @@ const sendPlainMessage = async (
     },
   });
   if (!sentMessageID) throw new Error('Failed to prepare review flow message');
+  if (knowledge.text) {
+    void reportSessionKnowledgeDelivered(directory, sessionID, knowledge.signature);
+  }
   return sentMessageID;
 };
 
@@ -419,13 +446,15 @@ const getReviewSessionTitle = (original: Session): string => {
 };
 
 // A review session runs tools too (reads other directories, verifies with commands),
-// so a fresh one starts with the same auto-accept choice as the session it reviews.
-// Failure only leaves the reviewer prompting for permissions the way it did before.
+// so a fresh one starts with the same permission mode as the session it reviews.
+// Failure only leaves the reviewer on the default mode the server gave it.
 const inheritPermissionAutoAccept = async (originalSessionID: string, reviewSessionID: string): Promise<void> => {
   const permissions = usePermissionStore.getState();
-  if (!permissions.isSessionAutoAccepting(originalSessionID)) return;
+  // `ask` is copied too: otherwise the server's default could make the
+  // reviewer more permissive than the session it reviews.
+  const mode = permissions.getSessionMode(originalSessionID);
   try {
-    await permissions.setSessionAutoAccept(reviewSessionID, true);
+    await permissions.setSessionMode(reviewSessionID, mode);
   } catch (error) {
     console.warn('[review-flow] failed to inherit permission auto-accept for review session', error);
   }

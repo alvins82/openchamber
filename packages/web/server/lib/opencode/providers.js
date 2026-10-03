@@ -9,7 +9,9 @@ import {
   readSectionEntry,
   writeSectionEntry,
   deleteSectionEntry,
+  toModelVariants,
   toProviderEntity,
+  readStoredProviderEntry,
   toProviderPackage,
   toNpmPackage,
 } from './config-v2.js';
@@ -42,6 +44,8 @@ function getProviderSources(providerId, workingDirectory) {
       project: { exists: providerExistsIn(projectConfig, providerId), path: paths.projectPath || null },
       custom: { exists: providerExistsIn(customConfig, providerId), path: paths.customPath },
     },
+    // Same precedence as the edit scope: custom > project > user.
+    config: readStoredProviderEntry([customConfig, projectConfig, userConfig], providerId),
   };
 }
 
@@ -108,6 +112,10 @@ function validateCustomProviderConfig(providerId, config, options = {}) {
       return { ok: false, error: `Model "${trimmedId}" requires a name` };
     }
     normalizedModels[trimmedId] = { modelID: trimmedId, name: modelName };
+    // Present means the caller owns the levels; an empty list removes them.
+    if (Array.isArray(modelValue.variants)) {
+      normalizedModels[trimmedId].variants = toModelVariants(modelValue.variants);
+    }
   }
 
   const normalized = {
@@ -166,7 +174,11 @@ function mergeCustomProviderConfig(existingValue, normalizedConfig) {
   const mergedModels = Object.fromEntries(
     Object.entries(normalizedModels).map(([modelId, normalizedModel]) => {
       const existingModel = isPlainObject(existingModels[modelId]) ? existingModels[modelId] : {};
-      return [modelId, { ...existingModel, ...normalizedModel }];
+      const mergedModel = { ...existingModel, ...normalizedModel };
+      if (Array.isArray(mergedModel.variants) && mergedModel.variants.length === 0) {
+        delete mergedModel.variants;
+      }
+      return [modelId, mergedModel];
     }),
   );
 

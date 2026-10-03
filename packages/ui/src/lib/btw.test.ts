@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, mock, test } from 'bun:test';
 import type { Message, Part, Session } from '@/lib/opencode/model';
 import type { MessagePage } from '@/lib/opencode/client';
 import type { StartBtwInput } from './btw';
+import { normalizePath } from '@/lib/pathNormalization';
 
 type ForkOptions = { before?: string; directory?: string | null };
 let forkSessionImpl: (sessionId: string, options?: ForkOptions) => Promise<Session>;
@@ -56,10 +57,11 @@ mock.module('@/sync/sync-refs', () => ({
   registerSessionDirectory: (sessionId: string, directory: string) => { registeredDirectories.push(`${sessionId}:${directory}`); },
   getSyncMessages: () => parentSyncMessages,
   getSyncChildStores: () => ({
-    children: new Map([['/project', {
+    // Mirrors ChildStoreManager.getChild: keys are normalized paths.
+    getChild: (directory: string) => (normalizePath(directory) === '/project' || normalizePath(directory) === 'C:/project' ? {
       getState: () => ({ session: childStoreSessions }),
       setState: (patch: { session: Session[] }) => { childStoreSessions.length = 0; childStoreSessions.push(...patch.session); },
-    }]]),
+    } : undefined),
   }),
 }));
 
@@ -84,10 +86,10 @@ const record = (id: string, created = 1): { info: Message; parts: Part[] } => ({
   parts: [],
 });
 
-// SAFETY: `findLastCompletedAssistantMessageID` reads only `id`, `role` and
-// `time`, which are the fields spelled out here.
-const assistantMessage = (id: string, completed?: number) =>
-  ({ id, sessionID: 'parent-1', role: 'assistant', time: { created: 1, completed } }) as Message;
+// SAFETY: `findLastCompletedAssistantMessageID` reads only `id`, `role`,
+// `time` and `finish`, which are the fields spelled out here.
+const assistantMessage = (id: string, completed?: number, finish: string | undefined = completed === undefined ? undefined : 'stop') =>
+  ({ id, sessionID: 'parent-1', role: 'assistant', time: { created: 1, completed }, finish }) as Message;
 
 // SAFETY: same narrow read as `assistantMessage`.
 const userMessage = (id: string) =>
@@ -159,6 +161,11 @@ describe('findLastCompletedAssistantMessageID', () => {
     expect(findLastCompletedAssistantMessageID(messages)).toBe('msg-1');
   });
 
+  test('skips a completed step that ended in a tool call mid-turn', () => {
+    const messages = [assistantMessage('msg-1', 10), userMessage('msg-2'), assistantMessage('msg-3', 20, 'tool-calls')];
+    expect(findLastCompletedAssistantMessageID(messages)).toBe('msg-1');
+  });
+
   test('a session with no completed assistant turn has no fork point', () => {
     expect(findLastCompletedAssistantMessageID([userMessage('msg-1')])).toBe(null);
   });
@@ -195,6 +202,14 @@ describe('startBtwSession', () => {
     ]);
     // Transient creating flag is cleared once the flow settles.
     expect(useBtwStore.getState().byParent).toEqual({ 'parent-1': { creating: false } });
+  });
+
+  test('inserts a fork returned with a native Windows path into the normalized directory store', async () => {
+    forkSessionImpl = () => Promise.resolve(makeSession('fork-1', 'C:\\project'));
+
+    await startBtwSession({ ...startInput, directory: 'C:/project' });
+
+    expect(childStoreSessions.map((s) => s.id)).toEqual(['fork-1']);
   });
 
   test('forks at the last completed assistant turn, not at the in-flight one', async () => {

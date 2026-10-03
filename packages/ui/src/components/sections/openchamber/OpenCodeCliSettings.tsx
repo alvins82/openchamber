@@ -13,13 +13,17 @@ import {
 import { isDesktopShell, requestFileAccess } from '@/lib/desktop';
 import { loadDesktopSettings, updateDesktopSettings } from '@/lib/persistence';
 import { reloadOpenCodeConfiguration } from '@/stores/useAgentsStore';
+import { restartOpenCodeWithFeedback } from '@/lib/restartOpenCode';
 import { useUIStore } from '@/stores/useUIStore';
+import { useEnterprisePolicyStore } from '@/stores/useEnterprisePolicyStore';
 import { useI18n } from '@/lib/i18n';
-import { isWindowsArm64 } from '@/lib/platform';
 import { toast } from '@/components/ui';
 
 export const OpenCodeCliSettings: React.FC = () => {
   const { t } = useI18n();
+  // The server starts OpenCode only from the administrator's path and ignores
+  // the user's setting, so the field shows that path and stays read-only.
+  const pinnedBinary = useEnterprisePolicyStore((state) => state.opencodeBinary);
   const [value, setValue] = React.useState('');
   const [isLoading, setIsLoading] = React.useState(true);
   const [isSaving, setIsSaving] = React.useState(false);
@@ -101,6 +105,15 @@ export const OpenCodeCliSettings: React.FC = () => {
     }
   }, [t, value]);
 
+  const handleRestart = React.useCallback(async () => {
+    setIsSaving(true);
+    try {
+      await restartOpenCodeWithFeedback(t);
+    } finally {
+      setIsSaving(false);
+    }
+  }, [t]);
+
   const handleShowUpdateNotificationsChange = React.useCallback((enabled: boolean) => {
     setShowOpenCodeUpdateNotifications(enabled);
     void updateDesktopSettings({ showOpenCodeUpdateNotifications: enabled });
@@ -124,14 +137,15 @@ export const OpenCodeCliSettings: React.FC = () => {
               {'.'}
             </>
           )}
+          description={pinnedBinary ? t('settings.openchamber.opencodeCli.field.pinnedByAdministrator') : undefined}
           alignEnd={false}
           controlClassName="@xl:w-[20rem]"
         >
           <Input
-            value={value}
+            value={pinnedBinary ?? value}
             onChange={(e) => setValue(e.target.value)}
             placeholder={t('settings.openchamber.opencodeCli.field.binaryPathPlaceholder')}
-            disabled={isLoading || isSaving}
+            disabled={isLoading || isSaving || pinnedBinary !== null}
             className="h-8 min-w-0 flex-1 font-mono text-xs"
           />
           <Button
@@ -139,7 +153,7 @@ export const OpenCodeCliSettings: React.FC = () => {
             variant="outline"
             size="xs"
             onClick={handleBrowse}
-            disabled={isLoading || isSaving || !isDesktopShell()}
+            disabled={isLoading || isSaving || !isDesktopShell() || pinnedBinary !== null}
             className={SETTINGS_ICON_BUTTON_CLASS}
             aria-label={t('settings.openchamber.opencodeCli.actions.browseAria')}
             title={t('settings.openchamber.opencodeCli.actions.browse')}
@@ -149,27 +163,35 @@ export const OpenCodeCliSettings: React.FC = () => {
         </SettingsFieldRow>
 
         <SettingsInset className={SETTINGS_OPTION_STACK_CLASS}>
-          {!isWindowsArm64() && (
-            <SettingsCheckboxRow
-              settingsItem="sessions.opencode-update-notifications"
-              checked={showOpenCodeUpdateNotifications}
-              onChange={handleShowUpdateNotificationsChange}
-              label={t('settings.openchamber.opencodeCli.field.showUpdateNotifications')}
-              ariaLabel={t('settings.openchamber.opencodeCli.field.showUpdateNotificationsAria')}
-            />
-          )}
+          <SettingsCheckboxRow
+            settingsItem="sessions.opencode-update-notifications"
+            checked={showOpenCodeUpdateNotifications}
+            onChange={handleShowUpdateNotificationsChange}
+            label={t('settings.openchamber.opencodeCli.field.showUpdateNotifications')}
+            ariaLabel={t('settings.openchamber.opencodeCli.field.showUpdateNotificationsAria')}
+          />
 
-          <div className="flex justify-start py-1.5">
+          <div className="flex flex-wrap justify-start gap-2 py-1.5" data-settings-item="sessions.opencode-restart">
             <Button
               type="button"
               size="xs"
               onClick={handleSaveAndReload}
-              disabled={isLoading || isSaving}
+              disabled={isLoading || isSaving || pinnedBinary !== null}
               className="shrink-0 !font-normal"
             >
               {isSaving
                 ? t('settings.openchamber.opencodeCli.actions.restartingOpenCode')
                 : t('settings.openchamber.opencodeCli.actions.saveAndReload')}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              onClick={handleRestart}
+              disabled={isLoading || isSaving}
+              className="shrink-0 !font-normal"
+            >
+              {t('settings.openchamber.opencodeCli.actions.restart')}
             </Button>
           </div>
         </SettingsInset>

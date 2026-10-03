@@ -94,6 +94,7 @@ describe('mounted turn telemetry with live sync stores', () => {
     expect(dom.container.textContent).not.toContain('Whole turn');
     await act(async () => store().setState({ sessionStatusReady: true }));
     expect(dom.container.textContent).toContain('~6 tok/s');
+    expect(dom.container.textContent).toContain('Elapsed6.0s');
     expect(dom.container.textContent).toContain('100 ↑ · 30 ↓');
     const heading = dom.container.querySelector('button');
     if (!heading) throw new Error('Expected section heading');
@@ -102,6 +103,18 @@ describe('mounted turn telemetry with live sync stores', () => {
     expect(dom.container.querySelectorAll('svg').length).toBe(2);
     expect(tokenReads > 0).toBe(true);
     expect(messageRequests).toBe(0);
+  });
+
+  test('a pre-archive snapshot cannot enable turn stats after status invalidation', async () => {
+    await act(async () => store().setState({ sessionStatusReady: true }));
+    expect(dom.container.textContent).toContain('~6 tok/s');
+    await act(async () => store().setState({ sessionStatusInvalidated: { [sessionId]: true } }));
+    expect(dom.container.textContent).not.toContain('~6 tok/s');
+    tokenReads = 0;
+    await act(async () => store().setState({ part: { [assistant.id]: [] } }));
+    expect(tokenReads).toBe(0);
+    await act(async () => store().setState({ sessionStatusInvalidated: {} }));
+    expect(dom.container.textContent).toContain('~6 tok/s');
   });
 
   test('collapsed remount keeps a usable header and reopening reads fresh data', async () => {
@@ -208,7 +221,7 @@ describe('mounted turn telemetry with live sync stores', () => {
       },
     }));
     const triggers = dom.container.querySelectorAll<HTMLElement>('[data-slot="tooltip-trigger"]');
-    expect(triggers.length).toBe(9);
+    expect(triggers.length).toBe(10);
     for (const trigger of triggers) expect(trigger.tabIndex).toBe(0);
     expect(dom.container.querySelectorAll('[title]').length).toBe(0);
     const response = triggers[0];

@@ -1,3 +1,4 @@
+import { unwrapOpenCodeResponse } from '../opencode/response-envelope.js';
 const FETCH_TIMEOUT_MS = 15_000;
 const MESSAGE_FETCH_LIMIT = 20;
 
@@ -63,11 +64,7 @@ export const createContextObligatoryRuntime = ({
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     if (!response.ok) throw new Error(`OpenCode ${method} ${fetchPath} failed with ${response.status}`);
-    // OpenCode 2.x answers a single record as `{ location, data }`; lists come
-    // back as `{ data, cursor }` and are handed over as they are.
-    const payload = await response.json().catch(() => null);
-    if (!payload || Array.isArray(payload) || payload.constructor !== Object) return payload;
-    return 'data' in payload && 'location' in payload ? payload.data : payload;
+    return unwrapOpenCodeResponse(await response.json().catch(() => null));
   };
 
   const tick = async (sessionId, directory) => {
@@ -107,7 +104,8 @@ export const createContextObligatoryRuntime = ({
     const recentMessages = Array.isArray(recent?.data) ? recent.data : [];
     if (recentMessages.length === 0) return;
     const summary = recentMessages.find((message) => message?.type === 'compaction' && message?.status === 'completed');
-    if (!summary?.id || !summary?.time?.completed) return;
+    // A v2 compaction message has only `time.created`; `status` says it finished.
+    if (!summary?.id) return;
     if (state.openchamber.context_obligatory_last_compaction_message_id === summary.id) return;
 
     const fetched = await Promise.allSettled(state.messages.map(async (pinned) => {

@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 import { ChatViewProvider } from './ChatViewProvider';
-import { AgentManagerPanelProvider } from './AgentManagerPanelProvider';
 import { SessionEditorPanelProvider } from './SessionEditorPanelProvider';
 import { createOpenCodeManager, type OpenCodeManager } from './opencode';
+import { configureOpenCodeCredentials, openCodeCredentialSource } from './opencodeAuth';
 import { startGlobalEventWatcher, stopGlobalEventWatcher, setChatViewProvider } from './sessionActivityWatcher';
 import { pathsEqualWithNormalizedDriveLetter } from './pathUtils';
 import { resolveWorkspaceFolders } from './workspaceResolver';
@@ -23,7 +23,6 @@ function readDraftSnapshot(snapshot: unknown): Array<{ id: string; text: string 
   }
   return drafts;
 }
-let agentManagerProvider: AgentManagerPanelProvider | undefined;
 let sessionEditorProvider: SessionEditorPanelProvider | undefined;
 let openCodeManager: OpenCodeManager | undefined;
 let outputChannel: vscode.OutputChannel | undefined;
@@ -140,6 +139,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Create OpenCode manager first
   openCodeManager = createOpenCodeManager(context);
+  // Quota lookups read provider credentials from the running OpenCode.
+  configureOpenCodeCredentials(openCodeCredentialSource(openCodeManager));
 
   // Create chat view provider with manager reference
   // The webview will show a loading state until OpenCode is ready
@@ -208,15 +209,12 @@ export async function activate(context: vscode.ExtensionContext) {
 
   void maybeMoveChatToRightSidebarOnStartup();
 
-  // Create Agent Manager panel provider
-  agentManagerProvider = new AgentManagerPanelProvider(context, context.extensionUri, openCodeManager);
   sessionEditorProvider = new SessionEditorPanelProvider(context, context.extensionUri, openCodeManager);
 
   context.subscriptions.push(
     vscode.commands.registerCommand('openchamber.internal.settingsSynced', (settings: unknown) => {
       chatViewProvider?.notifySettingsSynced(settings);
       sessionEditorProvider?.notifySettingsSynced(settings);
-      agentManagerProvider?.notifySettingsSynced(settings);
     })
   );
 
@@ -224,7 +222,6 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('openchamber.internal.permissionAutoAcceptSynced', (snapshot: unknown) => {
       chatViewProvider?.notifyPermissionAutoAcceptSynced(snapshot);
       sessionEditorProvider?.notifyPermissionAutoAcceptSynced(snapshot);
-      agentManagerProvider?.notifyPermissionAutoAcceptSynced(snapshot);
     })
   );
 
@@ -232,13 +229,14 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.window.onDidChangeWindowState(() => {
       chatViewProvider?.notifyViewerStateChanged();
       sessionEditorProvider?.notifyViewerStateChanged();
-      agentManagerProvider?.notifyViewerStateChanged();
     })
   );
 
   context.subscriptions.push(
+    // The command id predates multi-run (it opened the removed Agent Manager
+    // panel); it stays so existing keybindings keep working.
     vscode.commands.registerCommand('openchamber.openAgentManager', () => {
-      agentManagerProvider?.createOrShow();
+      sessionEditorProvider?.createOrShowParallelDraft();
     })
   );
 
@@ -823,7 +821,6 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.window.onDidChangeActiveColorTheme((theme) => {
       chatViewProvider?.updateTheme(theme.kind);
-      agentManagerProvider?.updateTheme(theme.kind);
       sessionEditorProvider?.updateTheme(theme.kind);
     })
   );
@@ -839,7 +836,6 @@ export async function activate(context: vscode.ExtensionContext) {
         event.affectsConfiguration('workbench.preferredDarkColorTheme')
       ) {
         chatViewProvider?.updateTheme(vscode.window.activeColorTheme.kind);
-        agentManagerProvider?.updateTheme(vscode.window.activeColorTheme.kind);
         sessionEditorProvider?.updateTheme(vscode.window.activeColorTheme.kind);
       }
     })
@@ -849,7 +845,6 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     openCodeManager.onStatusChange((status, error) => {
       chatViewProvider?.updateConnectionStatus(status, error);
-      agentManagerProvider?.updateConnectionStatus(status, error);
       sessionEditorProvider?.updateConnectionStatus(status, error);
 
       // Start/stop global event watcher based on connection status
@@ -873,7 +868,6 @@ export async function deactivate() {
   await Promise.all([openCodeManager?.stop(), stopGitProcesses()]);
   openCodeManager = undefined;
   chatViewProvider = undefined;
-  agentManagerProvider = undefined;
   sessionEditorProvider = undefined;
   outputChannel?.dispose();
   outputChannel = undefined;

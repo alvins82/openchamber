@@ -154,7 +154,9 @@ export const createOpenChamberControlService = (dependencies) => {
     scheduledTaskService,
     browserControl = null,
     fileOpen = null,
+    notifyUser = null,
     agentMemoryActions = null,
+    sessionLinks = null,
     // Archive lives in OpenChamber's own store now — v2 has no route that sets
     // Session.time.archived — so an unwired store simply means nothing is archived.
     archiveStore = null,
@@ -208,6 +210,24 @@ export const createOpenChamberControlService = (dependencies) => {
       path: path.resolve(project.path),
       label: asNonEmptyString(project.label) || path.basename(project.path) || project.path,
     }));
+  };
+
+  // projectId and directory are two names for one scope. Accepting both let
+  // one silently win over the other, so every session action refuses the pair.
+  const assertSingleScope = (input) => {
+    if (asNonEmptyString(input.projectId) && asNonEmptyString(input.directory)) {
+      throw new OpenChamberControlError('Provide only one of projectId or directory', 400);
+    }
+  };
+
+  // An explicit projectId scopes a session read to that project's directory,
+  // resolved the same way create/send/fork resolve it. An unknown project is
+  // an error, never a silent read of the caller's directory or of every project.
+  const resolveReadDirectory = async (input, contextDirectory) => {
+    assertSingleScope(input);
+    const projectID = asNonEmptyString(input.projectId);
+    if (!projectID) return asNonEmptyString(input.directory) || asNonEmptyString(contextDirectory);
+    return sessionService.resolveDirectory({ projectId: projectID });
   };
 
   const models = async () => {
@@ -298,6 +318,7 @@ export const createOpenChamberControlService = (dependencies) => {
   const executeSessionAction = async (action, input, contextDirectory, signal) => {
     if (input.timeout !== undefined && input.wait !== true) throw new OpenChamberControlError('timeout requires wait', 400);
     if (input.lastAssistant === true && input.wait !== true) throw new OpenChamberControlError('lastAssistant requires wait', 400);
+    assertSingleScope(input);
     const sessionID = asNonEmptyString(input.sessionId);
     let directory = asNonEmptyString(input.directory) || (!input.projectId ? asNonEmptyString(contextDirectory) : null);
     if (sessionID && action !== 'session.create' && !asNonEmptyString(input.directory) && !input.projectId) {
@@ -365,6 +386,12 @@ export const createOpenChamberControlService = (dependencies) => {
    */
   const browserAction = async (action, input, signal, contextDirectory, contextSessionId) => {
     const parameters = {};
+    // Any action may name a tab; the browser that issued the id resolves it.
+    const tabId = asNonEmptyString(input.tabId);
+    if (tabId) {
+      if (tabId.length > 128) throw new OpenChamberControlError('tabId must be an id from browser.snapshot tabs', 400);
+      parameters.tabId = tabId;
+    }
 
     const readViewport = (required) => {
       const viewport = asNonEmptyString(input.viewport);
@@ -511,6 +538,22 @@ export const createOpenChamberControlService = (dependencies) => {
         }
         return browserAction(action, input, options.signal, contextDirectory, options.contextSessionId);
       }
+      if (action === 'notify.send') {
+        if (!notifyUser) {
+          throw new OpenChamberControlError('Notifications are not available on this server', 503);
+        }
+        const result = await notifyUser({
+          title: input.title,
+          body: input.body,
+          showWhenFocused: input.showWhenFocused,
+          sessionId: asNonEmptyString(options.contextSessionId) || undefined,
+          directory: asNonEmptyString(contextDirectory) || undefined,
+        });
+        if (result.status !== 200) {
+          throw new OpenChamberControlError(result.body.error, result.status);
+        }
+        return result.body;
+      }
       if (action === 'file.open') {
         if (!fileOpen) {
           throw new OpenChamberControlError('The file viewer is not available on this server', 503);
@@ -561,9 +604,25 @@ export const createOpenChamberControlService = (dependencies) => {
       if (action === 'session.create' || action === 'session.send' || action === 'session.fork') {
         return executeSessionAction(action, input, contextDirectory, options.signal);
       }
+      if (action === 'session.link') {
+        if (!sessionLinks) throw new OpenChamberControlError('Linking is not available on this server', 503);
+        assertSingleScope(input);
+        // An explicit session is linked where it lives; the calling session
+        // uses the directory the tool call came from.
+        const explicitSessionID = asNonEmptyString(input.sessionId);
+        const sessionID = explicitSessionID || asNonEmptyString(options.contextSessionId);
+        const directory = asNonEmptyString(input.directory)
+          || (explicitSessionID ? await resolveSessionDirectory(explicitSessionID) : null)
+          || asNonEmptyString(contextDirectory);
+        // Models put the link's fields beside the action as often as inside
+        // `link`; session.link has no other use for them, so both are read.
+        const link = input.link ?? { url: input.url, title: input.title, kind: input.kind, identifier: input.identifier };
+        return sessionLinks.link({ sessionId: sessionID, directory, link });
+      }
       if (action.startsWith('session.')) {
-        const directory = asNonEmptyString(input.directory) || asNonEmptyString(contextDirectory);
         const sessionID = asNonEmptyString(input.sessionId);
+        if (action !== 'session.list' && !sessionID) throw new OpenChamberControlError('sessionId is required', 400);
+        const directory = await resolveReadDirectory(input, contextDirectory);
         const client = await getClient(directory);
         if (action === 'session.list') {
           const limit = positiveInteger(input.limit, 10, 'limit');
@@ -586,7 +645,6 @@ export const createOpenChamberControlService = (dependencies) => {
           }
           return { sessions, limit, directory, archived: input.all === true ? 'included' : 'excluded' };
         }
-        if (!sessionID) throw new OpenChamberControlError('sessionId is required', 400);
         if (!directory) throw new OpenChamberControlError('directory is required', 400);
         if (action === 'session.status') {
           return { sessionId: sessionID, directory, sessionStatus: await sessionStatus(client, sessionID) };

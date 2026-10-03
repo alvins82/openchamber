@@ -668,6 +668,28 @@ function toProviderEntity(raw) {
   ]);
 }
 
+/**
+ * The provider entry an editor should start from: the winning config layer's
+ * stored entry (layers passed highest precedence first) in v2 shape, without
+ * the literal `settings.apiKey` secret. Returns null when no layer defines it.
+ * Unlike the live provider OpenCode serves, this carries `env` and only the
+ * reasoning levels the user wrote.
+ */
+function readStoredProviderEntry(configs, providerId) {
+  for (const config of configs) {
+    const { value } = readSectionEntry(config, 'providers', providerId);
+    if (value === undefined) continue;
+    const entity = toProviderEntity(value);
+    if (entity.settings && 'apiKey' in entity.settings) {
+      const { apiKey: _secret, ...settings } = entity.settings;
+      if (Object.keys(settings).length) entity.settings = settings;
+      else delete entity.settings;
+    }
+    return entity;
+  }
+  return null;
+}
+
 // ============== PLUGINS ==============
 
 const PLUGIN_SECTION = { v2: 'plugins', v1: 'plugin' };
@@ -713,6 +735,74 @@ function readPluginList(config) {
   ].filter((item) => item.entry !== null);
 }
 
+// ============== WEB SEARCH ==============
+
+/**
+ * The `websearch` key: `false` turns search off, `{ provider }` names a
+ * provider id or `"random"`. OpenChamber takes the choice flat (`false`, a
+ * string, or `null` to remove the key so OpenCode falls back to the answer
+ * given in chat, asking only when there is none).
+ * Returns `undefined` for anything else.
+ */
+function parseWebSearchSelection(value) {
+  if (value === null || value === false) return value;
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+/** Applies a parsed choice to a config object; returns whether it changed. */
+function writeWebSearchSelection(config, selection) {
+  const before = JSON.stringify(config.websearch);
+  if (selection === null) {
+    delete config.websearch;
+  } else if (selection === false) {
+    config.websearch = false;
+  } else {
+    config.websearch = { provider: selection };
+  }
+  return JSON.stringify(config.websearch) !== before;
+}
+
+// ============== SESSION WARMING ==============
+
+/**
+ * The `warming` key: `true` keeps idle sessions' prompt cache warm with
+ * OpenCode's defaults, an object tunes prompt/interval/duration. Turning it on
+ * keeps a hand-tuned object as is; turning it off removes the key (OpenCode's
+ * default is off). Returns whether the config changed.
+ */
+function writeWarmingEnabled(config, enabled) {
+  const before = JSON.stringify(config.warming);
+  if (!enabled) {
+    delete config.warming;
+  } else if (typeof config.warming !== 'object' || config.warming === null) {
+    config.warming = true;
+  }
+  return JSON.stringify(config.warming) !== before;
+}
+
+const hasWebSearchKey = (config) => config != null && Object.hasOwn(config, 'websearch');
+
+/**
+ * The project config path whose `websearch` wins over the file the Settings
+ * choice is written to, or `null`. OpenCode merges user < project files (every
+ * `opencode.json[c]` and `.opencode/opencode.json[c]` from the directory up to
+ * the project root) < `OPENCODE_CONFIG`, so any project file with the key
+ * decides unless `OPENCODE_CONFIG` sets it too. `layers` is what
+ * `readConfigLayers(directory)` returns; `projectFiles` lists the existing
+ * project config files deepest first, as `{ path, config }`.
+ */
+function findWebSearchProjectOverride(layers, projectFiles) {
+  if (hasWebSearchKey(layers?.customConfig)) return null;
+  const userPath = layers?.paths?.userPath ?? null;
+  for (const file of projectFiles ?? []) {
+    if (!file?.path || file.path === userPath) continue;
+    if (hasWebSearchKey(file.config)) return file.path;
+  }
+  return null;
+}
+
 export {
   PLUGIN_SECTION,
   isRecord,
@@ -738,10 +828,16 @@ export {
   readLayeredMcpEntries,
   writeMcpEntry,
   deleteMcpEntry,
+  toModelVariants,
   toProviderPackage,
   toNpmPackage,
   toProviderEntity,
+  readStoredProviderEntry,
   toPluginEntity,
   fromPluginEntity,
   readPluginList,
+  parseWebSearchSelection,
+  writeWebSearchSelection,
+  findWebSearchProjectOverride,
+  writeWarmingEnabled,
 };

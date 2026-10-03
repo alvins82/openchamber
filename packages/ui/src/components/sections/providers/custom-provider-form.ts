@@ -1,3 +1,6 @@
+import { z } from 'zod';
+import type { Model } from '@/lib/opencode/model';
+
 /**
  * Custom provider form helpers.
  * Mirrors OpenCode web UI validation and request construction so a provider
@@ -26,10 +29,23 @@ export type CustomProviderTranslator = (
   vars?: Record<string, string | number | boolean>,
 ) => string;
 
+/** One reasoning level as OpenCode stores it: an id plus the request change. */
+export type ModelVariantConfig = Model['variants'][number];
+/** What one reasoning level changes on the request. */
+export type ModelVariantOverlay = Omit<ModelVariantConfig, 'id'>;
+
 export type ModelRow = {
   row: string;
   id: string;
   name: string;
+  /** Comma-separated reasoning levels, e.g. "low, medium, high". */
+  variants: string;
+  /**
+   * Levels loaded from the saved config, kept verbatim so a hand-written
+   * overlay survives an edit. Emptied when the protocol changes; undefined
+   * only for rows the user added in this form.
+   */
+  savedVariants?: Record<string, ModelVariantOverlay>;
 };
 
 export type HeaderRow = {
@@ -73,14 +89,22 @@ export type CustomProviderConfig = {
     baseURL: string;
   };
   headers?: Record<string, string>;
-  models: Record<string, { modelID: string; name: string }>;
+  models: Record<string, CustomProviderModelConfig>;
+};
+
+export type CustomProviderModelConfig = {
+  modelID: string;
+  name: string;
+  variants?: ModelVariantConfig[];
 };
 
 export type CustomProviderPersistPlan = {
   providerID: string;
   name: string;
-  /** Literal API key to send via auth.set; omitted when using {env:VAR} or empty. */
+  /** Literal API key stored as an OpenCode credential after the config write; omitted when using {env:VAR} or empty. */
   apiKey?: string;
+  /** Edit without a new key or env: the provider keeps the credential OpenCode already holds. */
+  keepsStoredCredential?: boolean;
   config: CustomProviderConfig;
 };
 
@@ -116,7 +140,14 @@ export type ProviderLikeForCustomForm = {
   /** v1 spelling, still read from older config entries. */
   options?: Record<string, unknown> | null;
   models?:
-    | Array<{ id?: string; modelID?: string; name?: string; package?: string; api?: { npm?: string } }>
+    | Array<{
+      id?: string;
+      modelID?: string;
+      name?: string;
+      package?: string;
+      api?: { npm?: string };
+      variants?: readonly ModelVariantConfig[];
+    }>
     | Record<string, unknown>;
 };
 
@@ -145,7 +176,35 @@ export const createModelRow = (): ModelRow => ({
   row: nextRow(),
   id: '',
   name: '',
+  variants: '',
 });
+
+/**
+ * The request change for one reasoning level, spelled the way OpenCode spells
+ * it for its own providers of the same protocol (core/src/variant.ts). The
+ * `aisdk:` packages a custom provider uses get no automatic levels there.
+ */
+export function customVariantOverlay(protocol: CustomProviderProtocol, effort: string): ModelVariantOverlay {
+  switch (protocol) {
+    case 'openai-chat':
+      return { settings: { reasoningEffort: effort } };
+    case 'openai-responses':
+      return {
+        settings: { reasoningEffort: effort, reasoningSummary: 'auto', include: ['reasoning.encrypted_content'] },
+      };
+    case 'anthropic-messages':
+      return { settings: { thinking: { type: 'adaptive', display: 'summarized' }, effort } };
+  }
+}
+
+export function parseVariantIDs(value: string): string[] {
+  const ids = value.split(/[,\s]+/).map((id) => id.trim()).filter(Boolean);
+  return ids.filter((id, index) => ids.indexOf(id) === index);
+}
+
+function readSavedVariants(variants: readonly ModelVariantConfig[] | undefined): Record<string, ModelVariantOverlay> {
+  return Object.fromEntries((variants ?? []).map(({ id, ...overlay }) => [id, overlay]));
+}
 
 export const createHeaderRow = (): HeaderRow => ({
   row: nextRow(),
@@ -163,7 +222,20 @@ export const createEmptyCustomProviderForm = (): CustomProviderFormState => ({
   headers: [createHeaderRow()],
 });
 
+/**
+ * The live provider list reports OpenCode's own implementation of an `aisdk:`
+ * package (`aisdk:@ai-sdk/openai` is served as `@opencode/ai/providers/openai`),
+ * so both spellings map to the protocol the form saved.
+ */
+const NATIVE_CUSTOM_PROVIDER_PACKAGES: Record<string, CustomProviderProtocol> = {
+  '@opencode/ai/providers/openai-compatible': 'openai-chat',
+  '@opencode/ai/providers/openai': 'openai-responses',
+  '@opencode/ai/providers/anthropic': 'anthropic-messages',
+};
+
 function protocolFromPackage(pkg: string | undefined): CustomProviderProtocol {
+  const native = pkg ? NATIVE_CUSTOM_PROVIDER_PACKAGES[pkg] : undefined;
+  if (native) return native;
   switch (pkg) {
     case 'aisdk:@ai-sdk/openai':
     case '@ai-sdk/openai':
@@ -196,7 +268,10 @@ export function isCustomOpenAICompatibleProvider(provider: ProviderLikeForCustom
     return true;
   }
 
-  const knownPackages = new Set<string>(Object.values(CUSTOM_PROVIDER_PROTOCOLS));
+  const knownPackages = new Set<string>([
+    ...Object.values(CUSTOM_PROVIDER_PROTOCOLS),
+    ...Object.keys(NATIVE_CUSTOM_PROVIDER_PACKAGES),
+  ]);
   if (knownPackages.has(readPackage(provider) ?? '')) {
     return true;
   }
@@ -281,6 +356,7 @@ export function providerToCustomFormState(provider: ProviderLikeForCustomForm): 
             modelID: typeof entry.modelID === 'string' ? entry.modelID : id,
             name: typeof entry.name === 'string' ? entry.name : id,
             package: typeof entry.package === 'string' ? entry.package : undefined,
+            variants: storedVariantsSchema.safeParse(entry.variants).data,
           };
         })
       : []);
@@ -290,10 +366,13 @@ export function providerToCustomFormState(provider: ProviderLikeForCustomForm): 
         const id = typeof model?.modelID === 'string' && model.modelID
           ? model.modelID
           : (typeof model?.id === 'string' ? model.id : '');
+        const savedVariants = readSavedVariants(model?.variants);
         return {
           row: nextRow(),
           id,
           name: typeof model?.name === 'string' ? model.name : id,
+          variants: Object.keys(savedVariants).join(', '),
+          savedVariants,
         };
       })
     : [createModelRow()];
@@ -314,6 +393,70 @@ export function providerToCustomFormState(provider: ProviderLikeForCustomForm): 
     apiKey: envName ? `{env:${envName}}` : '',
     models,
     headers: headerRows.length > 0 ? headerRows : [createHeaderRow()],
+  };
+}
+
+const storedVariantsSchema = z.array(z.object({
+  id: z.string(),
+  settings: z.record(z.string(), z.unknown()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
+  body: z.record(z.string(), z.unknown()).optional(),
+}));
+
+export const storedProviderEntrySchema = z.object({
+  name: z.string().optional(),
+  package: z.string().optional(),
+  env: z.array(z.string()).optional(),
+  settings: z.record(z.string(), z.unknown()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
+  models: z.record(z.string(), z.object({
+    modelID: z.string().optional(),
+    name: z.string().optional(),
+    package: z.string().optional(),
+    variants: storedVariantsSchema.optional(),
+  })).optional(),
+});
+
+/**
+ * The provider entry as written in the OpenCode config file, returned by
+ * `/api/provider/:id/source` in v2 shape. Unlike the live provider it keeps
+ * `env` and carries only the reasoning levels the user wrote.
+ */
+export type StoredProviderEntry = z.infer<typeof storedProviderEntrySchema>;
+
+/**
+ * Edit form state for a config-defined provider. The stored entry is the
+ * source of truth; the live provider only fills the name, protocol, base URL,
+ * or models when the entry leaves them out (inherited from elsewhere). Live reasoning levels are never
+ * loaded: OpenCode generates them, and saving them back would write levels the
+ * user never configured. Without a stored entry, live models load without
+ * levels, so a save leaves the models' stored levels as they are.
+ */
+export function providerToEditFormState(
+  live: ProviderLikeForCustomForm,
+  stored: StoredProviderEntry | null,
+): CustomProviderFormState {
+  const liveModels = Array.isArray(live.models)
+    ? live.models.map((model) => ({ ...model, variants: undefined }))
+    : live.models;
+  const liveState = providerToCustomFormState({ ...live, models: liveModels });
+  if (!stored) {
+    return { ...liveState, models: liveState.models.map((model) => ({ ...model, savedVariants: undefined })) };
+  }
+
+  const storedState = providerToCustomFormState({ ...stored, id: live.id });
+  return {
+    providerID: live.id,
+    name: stored.name?.trim() ? storedState.name : liveState.name,
+    protocol: stored.package ? storedState.protocol : liveState.protocol,
+    baseURL: storedState.baseURL || liveState.baseURL,
+    // The live `env` and headers may come from a built-in provider this one
+    // inherits from; only what the entry itself stores is edited here.
+    apiKey: storedState.apiKey,
+    models: stored.models && Object.keys(stored.models).length > 0
+      ? storedState.models
+      : liveState.models.map((model) => ({ ...model, savedVariants: undefined })),
+    headers: storedState.headers,
   };
 }
 
@@ -379,7 +522,17 @@ export function validateCustomProvider(input: ValidateCustomProviderInput): Vali
   const modelConfig = Object.fromEntries(
     input.form.models.map((model) => {
       const modelID = model.id.trim();
-      return [modelID, { modelID, name: model.name.trim() }];
+      const entry: CustomProviderModelConfig = { modelID, name: model.name.trim() };
+      const variantIDs = parseVariantIDs(model.variants);
+      // A row loaded from config always sends its list, so emptying the field
+      // clears saved levels; a new row with no levels leaves the key out.
+      if (variantIDs.length > 0 || model.savedVariants !== undefined) {
+        entry.variants = variantIDs.map((id) => ({
+          id,
+          ...(model.savedVariants?.[id] ?? customVariantOverlay(input.form.protocol, id)),
+        }));
+      }
+      return [modelID, entry];
     }),
   );
 
@@ -432,6 +585,7 @@ export function validateCustomProvider(input: ValidateCustomProviderInput): Vali
       providerID,
       name,
       apiKey: key,
+      ...(!env && !key ? { keepsStoredCredential: true } : {}),
       config: buildCustomProviderConfig({
         protocol: input.form.protocol,
         name,
@@ -450,7 +604,7 @@ function buildCustomProviderConfig(input: {
   env?: string;
   baseURL: string;
   headers: Record<string, string>;
-  models: Record<string, { modelID: string; name: string }>;
+  models: Record<string, CustomProviderModelConfig>;
 }): CustomProviderConfig {
   const config: CustomProviderConfig = {
     package: CUSTOM_PROVIDER_PROTOCOLS[input.protocol],
@@ -466,7 +620,9 @@ function buildCustomProviderConfig(input: {
 /**
  * Builds the `integration.connect.key` request body when a literal API key is
  * present. OpenCode v2 stores provider keys as integration credentials; there
- * is no `auth.json` to write any more.
+ * is no `auth.json` to write any more. A custom provider has no catalog entry,
+ * so OpenCode registers its key method only once the provider is in config:
+ * send this after the config write (see `storeKeyAfterConfigWrite`).
  */
 export function buildIntegrationKeyRequest(plan: CustomProviderPersistPlan): {
   integrationID: string;
@@ -493,10 +649,38 @@ export function buildProviderUpsertRequest(
   providerID: string;
   config: CustomProviderConfig;
   scope: ProviderConfigScope;
+  hasCredential: boolean;
 } {
   return {
     providerID: plan.providerID,
     config: plan.config,
     scope: options?.scope ?? 'user',
+    // The server cannot see OpenCode 2 credentials, so the form vouches for a
+    // key it is about to store or one the edited provider already has.
+    hasCredential: Boolean(plan.apiKey || plan.keepsStoredCredential),
   };
+}
+
+const KEY_METHOD_RETRY_DELAYS_MS = [250, 500, 1_000, 2_000];
+
+/**
+ * Stores a custom provider's key right after its config was written. OpenCode
+ * picks the config up from its file watcher, and until then it rejects the key
+ * with "Integration not found"; only that rejection is retried, briefly.
+ */
+export async function storeKeyAfterConfigWrite(
+  connectKey: () => Promise<unknown>,
+  wait: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await connectKey();
+      return;
+    } catch (error) {
+      const delay = KEY_METHOD_RETRY_DELAYS_MS[attempt];
+      const notRegisteredYet = error instanceof Error && /not found/i.test(error.message);
+      if (!notRegisteredYet || delay === undefined) throw error;
+      await wait(delay);
+    }
+  }
 }

@@ -1,3 +1,4 @@
+import { OpenCodeCompatibilityGate } from '@/components/update/OpenCodeCompatibilityGate';
 import React from 'react';
 import { AppStartupOverlay } from '@/components/ui/AppStartupOverlay';
 import { MainLayout } from '@/components/layout/MainLayout';
@@ -21,12 +22,13 @@ import { usePushVisibilityBeacon } from '@/hooks/usePushVisibilityBeacon';
 import { useWebNotificationStream } from '@/hooks/useWebNotificationStream';
 import { useAgentMemorySync } from '@/hooks/useAgentMemorySync';
 import { useBrowserProviderSync } from '@/hooks/useBrowserProviderSync';
+import { useEnterprisePolicySync } from '@/hooks/useEnterprisePolicySync';
 import { useRoutingSync } from '@/hooks/useRoutingSync';
 import { usePwaInstallPrompt } from '@/hooks/usePwaInstallPrompt';
 import { useWindowTitle } from '@/hooks/useWindowTitle';
 import { useRootScrollLock } from '@/hooks/useRootScrollLock';
 import { useConfigStore } from '@/stores/useConfigStore';
-import { isDesktopLocalOriginActive, isDesktopShell, restartDesktopApp, invokeDesktop } from '@/lib/desktop';
+import { isDesktopLocalOriginActive, isDesktopShell, restartDesktopApp, invokeDesktop, takePendingDesktopSessionLinks } from '@/lib/desktop';
 import {
   getInjectedBootOutcome,
   getBootInjectionStatus,
@@ -38,6 +40,8 @@ import {
 } from '@/lib/desktopBoot';
 import type { RecoveryVariant } from '@/components/onboarding/DesktopConnectionRecovery';
 import { useSessionUIStore } from '@/sync/session-ui-store';
+import { openSessionLink } from '@/lib/router/openSessionFromRoute';
+import { restoreLastActiveSession } from '@/sync/last-session-restore';
 import { markSessionViewed } from '@/sync/notification-store';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { opencodeClient } from '@/lib/opencode/client';
@@ -66,11 +70,12 @@ import {
   requestEmbeddedSessionVisibility,
 } from '@/components/layout/contextPanelEmbeddedChat';
 import { SyncAppEffects } from '@/apps/AppEffects';
-import { resetAppForRuntimeEndpointChange } from '@/apps/runtimeEndpointReset';
+import { isSameRuntimeEndpoint, resetAppForRuntimeEndpointChange } from '@/apps/runtimeEndpointReset';
 import { useAppFontEffects } from '@/apps/useAppFontEffects';
 import { OpenCodeUpdateToast } from '@/components/update/OpenCodeUpdateToast';
+import { ProjectConfigErrorToast } from '@/components/projects/ProjectConfigErrorToast';
 import { markStartupTrace, startupTraceEnabled } from '@/lib/startupTrace';
-import { fetchStartupDiagnostics, type StartupDiagnostics } from '@/lib/startupDiagnostics';
+import { fetchStartupDiagnostics, getInitRecoveryDescriptionKey, type StartupDiagnostics } from '@/lib/startupDiagnostics';
 
 // Lazy-loaded heavy views — loaded on demand to reduce initial bundle size.
 const OnboardingScreen = lazyWithChunkRecovery(() =>
@@ -112,13 +117,23 @@ const StartupInitializationRecovery: React.FC<{
     };
   }, []);
 
+  const failure = useConfigStore((s) => s.lastInitFailure);
+  // Server diagnostics outrank the client's guess: they prove the server answered.
+  const failureMessage = diagnostics ? null : failure?.message ?? null;
+
   return (
     <div className="flex h-full flex-col items-center overflow-y-auto bg-background px-6 py-6 text-foreground">
       <div className="my-auto flex w-full max-w-xl shrink-0 flex-col items-center gap-4 text-center">
         <div className="flex flex-col gap-2">
           <h1 className="typography-title text-foreground">{t('startup.initRecovery.title')}</h1>
-          <p className="typography-body text-muted-foreground">{t(diagnostics ? 'startup.initRecovery.openCodeUnavailable' : 'startup.initRecovery.description')}</p>
+          <p className="typography-body text-muted-foreground">{t(getInitRecoveryDescriptionKey(diagnostics, failure))}</p>
         </div>
+        {failureMessage && (
+          <dl className="w-full min-w-0 text-left" aria-live="polite">
+            <dt className="typography-meta text-muted-foreground">{t('startup.initRecovery.lastError')}</dt>
+            <dd className="max-h-56 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-[var(--surface-muted)] px-3 py-2 font-mono typography-meta text-muted-foreground">{failureMessage}</dd>
+          </dl>
+        )}
         {diagnostics && (
           <dl className="w-full min-w-0 space-y-3 text-left" aria-live="polite">
             {diagnostics.binary && (
@@ -322,8 +337,13 @@ function App({ apis }: AppProps) {
   }, [apis.runtime.isVSCode]);
 
   React.useEffect(() => {
+    // A change of runtime is reset by `installRuntimeEndpointReset`, which runs
+    // even while a gate has this component unmounted. Same-runtime credential
+    // changes reset only here, so a sign-in behind the login gate keeps state.
     return subscribeRuntimeEndpointChanged((detail) => {
-      resetAppForRuntimeEndpointChange(detail);
+      if (isSameRuntimeEndpoint(detail)) {
+        resetAppForRuntimeEndpointChange(detail);
+      }
       setRuntimeEndpointEpoch((epoch) => epoch + 1);
       setInitRetryExhausted(false);
       setInitRetryEpoch((epoch) => epoch + 1);
@@ -659,18 +679,43 @@ function App({ apis }: AppProps) {
     if (typeof window === 'undefined') return;
 
     const handler = (event: Event) => {
-      const detail = (event as CustomEvent<{ sessionId?: string; directory?: string }>).detail;
+      const detail = (event as CustomEvent<{ sessionId?: string; directory?: string; messageId?: string }>).detail;
       const sessionId = typeof detail?.sessionId === 'string' ? detail.sessionId.trim() : '';
       if (!sessionId) return;
       const directory = typeof detail?.directory === 'string' && detail.directory.trim().length > 0
         ? detail.directory.trim()
         : null;
+      // A link (a desktop deep link, a link to this window's instance) carries
+      // no directory; the route opener resolves it from the global session
+      // list, as for a web link.
+      if (!directory) {
+        void openSessionLink(sessionId, typeof detail?.messageId === 'string' ? detail.messageId.trim() : null);
+        return;
+      }
       void useSessionUIStore.getState().setCurrentSession(sessionId, directory);
     };
 
     window.addEventListener('openchamber:open-session', handler as EventListener);
+    // A link that launched the app arrived before this listener existed; the
+    // desktop shell keeps it until the window asks. Taking is one-shot, so a
+    // cleanup must not drop links already taken (Strict Mode re-runs this).
+    if (!embeddedSessionChat) {
+      void takePendingDesktopSessionLinks().then((links) => {
+        for (const link of links) void openSessionLink(link.sessionId, link.messageId);
+      });
+    }
     return () => window.removeEventListener('openchamber:open-session', handler as EventListener);
-  }, []);
+  }, [embeddedSessionChat]);
+
+  // Launch continuity: reopen the session that was open when the app last
+  // closed, once per page load. A link or route that already opened
+  // something wins; see restoreLastActiveSession.
+  const lastSessionRestoreStartedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!isInitialized || embeddedSessionChat || lastSessionRestoreStartedRef.current) return;
+    lastSessionRestoreStartedRef.current = true;
+    void restoreLastActiveSession({ refresh: false });
+  }, [embeddedSessionChat, isInitialized]);
 
   // Open a draft Mini Chat window from the native File menu / tray. Uses a
   // dedicated single-fire event (not the menu-action channel) because draft
@@ -747,6 +792,7 @@ function App({ apis }: AppProps) {
   useAgentMemorySync(currentDirectory || null);
   useBrowserProviderSync();
   useRoutingSync();
+  useEnterprisePolicySync();
   usePwaInstallPrompt();
 
   useWindowTitle();
@@ -973,6 +1019,7 @@ function App({ apis }: AppProps) {
                 <div className={isDesktopRuntime ? 'h-full text-foreground bg-transparent' : 'h-full text-foreground bg-background'}>
                   <SyncAppEffects embeddedBackgroundWorkEnabled={embeddedBackgroundWorkEnabled} />
                   <OpenCodeUpdateToast />
+                  <ProjectConfigErrorToast />
                   <MainLayout />
                   <AppStartupOverlay ready={isInitialized && (!isDesktopRuntime || (bootOutcomeKnown && bootViewIsMain))} />
                   <Toaster />
@@ -996,4 +1043,6 @@ function App({ apis }: AppProps) {
   );
 }
 
-export default App;
+export default function CompatibleApp(props: AppProps) {
+  return <OpenCodeCompatibilityGate><App {...props} /></OpenCodeCompatibilityGate>;
+}

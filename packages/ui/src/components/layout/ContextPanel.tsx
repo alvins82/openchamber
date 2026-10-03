@@ -35,7 +35,7 @@ import { setExternallyViewedSession, useDirectoryStore } from '@/sync/sync-conte
 import { ContextPanelContent } from './ContextSidebarTab';
 import { BrowserPane } from '@/components/browser/BrowserPane';
 import { browserUrlLabel } from '@/lib/browser/url';
-import { registerBrowserOpener } from '@/lib/browser/controlClient';
+import { registerBrowserOpener, registerSleepingBrowserTab, setShownBrowserTab } from '@/lib/browser/controlClient';
 import { subscribeOpenchamberEvents } from '@/lib/openchamberEvents';
 import { getRuntimeBearerTokenSync, getRuntimeExtraHeadersSync } from '@/lib/runtime-auth';
 import { getRuntimeApiBaseUrl, getRuntimeKey } from '@/lib/runtime-switch';
@@ -63,13 +63,39 @@ const DOCK_LAYOUT = {
   right: { container: 'flex-row-reverse', page: 'border-l border-border', vertical: false },
 } as const;
 
+/**
+ * A shared-surface extension's own page, docked to one edge of the picture.
+ * It starts at the manifest's `panel.size` and follows the page's
+ * `host.setHeight` after that (the thickness across its edge, so a width
+ * for a left or right dock), never below the manifest minimum and never past
+ * half the panel, so the picture always stays in view.
+ */
+const DockedGuestPage: React.FC<{ mode: PluginContextPanelMode; docking: GuestSurfaceDocking }> = ({ mode, docking }) => {
+  const [requested, setRequested] = React.useState<number | null>(null);
+  const layout = DOCK_LAYOUT[docking.dock];
+  const size = Math.max(GUEST_SURFACE_DOCK_SIZE_MIN, requested ?? docking.size);
+  return (
+    <div
+      className={cn(
+        'shrink-0 overflow-hidden duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none',
+        layout.vertical ? 'max-h-[50%] transition-[height]' : 'max-w-[50%] transition-[width]',
+        layout.page,
+      )}
+      style={layout.vertical ? { height: size } : { width: size }}
+    >
+      <PluginPane mode={mode} onResize={setRequested} />
+    </div>
+  );
+};
+
 const GuestSurfacePane = React.lazy(() => import('./GuestSurfacePane').then((module) => ({ default: module.GuestSurfacePane })));
 import { useGuestsStore } from '@/lib/guests/store';
 import { guestHasSharedSurface, guestSurfaceDocking, type GuestSurfaceDocking } from '@/lib/guests/surfaces';
 import { FALLBACK_GUEST_ICON } from '@/lib/guests/icon';
-import { isPluginContextPanelMode, pluginIdFromMode } from '@/lib/surfaces/modes';
+import { GUEST_SURFACE_DOCK_SIZE_MIN } from '@openchamber/sdk';
+import { isPluginContextPanelMode, pluginIdFromMode, type PluginContextPanelMode } from '@/lib/surfaces/modes';
 import { getContextSurfaceWidthFraction } from '@/lib/surfaces/registry';
-import { isVimEditorEventTarget } from '@/lib/editorFocus';
+import { isEditorEventTarget } from '@/lib/editorFocus';
 import { isTerminalEventTarget } from '@/lib/terminalFocus';
 
 const CONTEXT_PANEL_MIN_WIDTH = 320;
@@ -497,21 +523,36 @@ export const ContextPanel: React.FC = () => {
   const panelState = useUIStore((state) => (directoryKey ? state.contextPanelByDirectory[directoryKey] : undefined));
   const closeContextPanel = useUIStore((state) => state.closeContextPanel);
   const closeContextPanelTab = useUIStore((state) => state.closeContextPanelTab);
+  const pinContextPanelTab = useUIStore((state) => state.pinContextPanelTab);
   const openContextPanelTab = useUIStore((state) => state.openContextPanelTab);
   const toggleContextPanelExpanded = useUIStore((state) => state.toggleContextPanelExpanded);
   const setContextPanelWidth = useUIStore((state) => state.setContextPanelWidth);
   const setActiveContextPanelTab = useUIStore((state) => state.setActiveContextPanelTab);
-  const openContextBrowser = useUIStore((state) => state.openContextBrowser);
+  const openAgentBrowserTab = useUIStore((state) => state.openAgentBrowserTab);
 
-  // Lets an agent's browser.open create the tab it needs when none is open yet.
-  // Registered from the panel because opening a tab is panel state, not
-  // something the browser view itself can do before it exists. Reveal the
-  // panel so Electron gives the webview a composited surface; capturePage()
-  // cannot capture the zero-width webview inside a closed panel.
+  // A browser tab loads its page only once it is needed: shown in the open
+  // panel, opened by the agent, or woken by an agent action. Tabs restored
+  // from a previous run otherwise stay asleep, since every loaded tab costs a
+  // Chromium process. Once loaded, a tab stays loaded until it is closed.
+  const [wokenBrowserTabIds, setWokenBrowserTabIds] = React.useState<ReadonlySet<string>>(() => new Set());
+  const wakeBrowserTab = React.useCallback((tabId: string) => {
+    setWokenBrowserTabIds((current) => (current.has(tabId) ? current : new Set(current).add(tabId)));
+  }, []);
+
+  // Lets an agent's browser.open create its own tab; the id goes back to the
+  // agent so it keeps working there. Registered from the panel because opening a tab is panel state, not
+  // something the browser view itself can do before it exists. Background on
+  // purpose: an agent working a page must not pop the panel open or steal the
+  // active tab while the user reads something else, and that includes taking
+  // a screenshot of it. The tab appears in the strip.
   React.useEffect(() => {
     if (!effectiveDirectory) return;
-    return registerBrowserOpener((url) => openContextBrowser(effectiveDirectory, url));
-  }, [effectiveDirectory, openContextBrowser]);
+    return registerBrowserOpener((url) => {
+      const tabId = openAgentBrowserTab(effectiveDirectory, url);
+      if (tabId) wakeBrowserTab(tabId);
+      return tabId;
+    });
+  }, [effectiveDirectory, openAgentBrowserTab, wakeBrowserTab]);
   // The agent asked for a file to be shown. It opens in front of whatever tab
   // the user had, on purpose: the agent is pointing at a result, and the prior
   // tab is one click away.
@@ -537,6 +578,11 @@ export const ContextPanel: React.FC = () => {
 
   const tabs = React.useMemo(() => panelState?.tabs ?? [], [panelState?.tabs]);
   const activeTab = tabs.find((tab) => tab.id === panelState?.activeTabId) ?? tabs[tabs.length - 1] ?? null;
+  // Agent actions that name no tab go to the browser tab the user last had in front of them.
+  const shownBrowserTabId = activeTab?.mode === 'browser' ? activeTab.id : null;
+  React.useEffect(() => {
+    if (shownBrowserTabId) setShownBrowserTab(shownBrowserTabId);
+  }, [shownBrowserTabId]);
   const isOpen = Boolean(panelState?.isOpen && activeTab);
   const [availablePanelAreaWidth, setAvailablePanelAreaWidth] = React.useState<number | null>(null);
   const hasOpenEditorFile = React.useMemo(
@@ -772,9 +818,14 @@ export const ContextPanel: React.FC = () => {
     if (isTerminalEventTarget(event.target)) {
       return;
     }
-    // Same for the file editor on the Vim keymap: Escape leaves INSERT mode
-    // there, and CodeMirror only sees it if this handler stays out of the way.
-    if (isVimEditorEventTarget(event.target)) {
+    // Same for the file editor and what it opens over itself (search, the
+    // symbol list, go to line): Escape closes those, leaves Vim's INSERT mode
+    // or collapses several cursors, and must not close the whole panel.
+    if (isEditorEventTarget(event.target)) {
+      return;
+    }
+    // Something under the panel already handled this Escape.
+    if (event.defaultPrevented) {
       return;
     }
 
@@ -1031,6 +1082,7 @@ export const ContextPanel: React.FC = () => {
       icon: getTabIcon(tab, faviconByOrigin),
       title: tabPathLabel ? `${rawLabel}: ${tabPathLabel}` : rawLabel,
       closeLabel: t('contextPanel.tab.closeTabAria', { label }),
+      preview: tab.preview,
     };
   }), [activeModeTabs, effectiveDirectory, faviconByOrigin, sessionTitleById, t]);
 
@@ -1057,6 +1109,27 @@ export const ContextPanel: React.FC = () => {
     () => tabs.filter((tab) => tab.mode === 'browser'),
     [tabs],
   );
+  const visibleBrowserTabId = isOpen && activeTab?.mode === 'browser' ? activeTab.id : null;
+  React.useEffect(() => {
+    if (visibleBrowserTabId) wakeBrowserTab(visibleBrowserTabId);
+  }, [visibleBrowserTabId, wakeBrowserTab]);
+  const loadedBrowserTabs = React.useMemo(
+    () => browserTabs.filter((tab) => tab.id === visibleBrowserTabId || wokenBrowserTabIds.has(tab.id)),
+    [browserTabs, visibleBrowserTabId, wokenBrowserTabIds],
+  );
+  React.useEffect(() => {
+    // Only a Chromium host mounts views that agents can drive, so only it may
+    // offer to wake a tab; anywhere else a claimed action could never run.
+    if (!window.__OPENCHAMBER_ELECTRON__) return;
+    const unregister = browserTabs
+      .filter((tab) => !loadedBrowserTabs.includes(tab))
+      .map((tab) => registerSleepingBrowserTab({
+        tabId: tab.id,
+        describe: () => ({ title: '', url: tab.targetPath ?? '' }),
+        wake: () => wakeBrowserTab(tab.id),
+      }));
+    return () => unregister.forEach((release) => release());
+  }, [browserTabs, loadedBrowserTabs, wakeBrowserTab]);
   const diffTabs = React.useMemo(
     () => tabs.filter((tab) => tab.mode === 'diff'),
     [tabs],
@@ -1163,6 +1236,9 @@ export const ContextPanel: React.FC = () => {
               return;
             }
             reorderContextPanelTabs(directoryKey, activeTabID, overTabID);
+          }}
+          onDoubleClickTab={(tabID) => {
+            if (directoryKey) pinContextPanelTab(directoryKey, tabID);
           }}
           layoutMode="scrollable"
           variant="default"
@@ -1375,13 +1451,16 @@ export const ContextPanel: React.FC = () => {
             }}
           />
         ) : null}
-        {browserTabs.map((tab) => (
+        {loadedBrowserTabs.map((tab) => (
           <div
             key={tab.id}
+            // Invisible rather than display:none, so a background tab the agent
+            // is working keeps its layout and its snapshots read a real page.
             className={cn(
               'absolute inset-0',
-              activeTab?.id !== tab.id && 'hidden'
+              activeTab?.id !== tab.id && 'invisible pointer-events-none'
             )}
+            aria-hidden={activeTab?.id !== tab.id || undefined}
           >
             <BrowserPane initialUrl={tab.targetPath ?? ''} directory={directoryKey} tabID={tab.id} />
           </div>
@@ -1411,7 +1490,11 @@ export const ContextPanel: React.FC = () => {
         ))}
         {terminalTab ? (
           <div className={cn('absolute inset-0', activeTab?.mode === 'terminal' ? 'block' : 'hidden')}>
-            <TerminalView visible={isOpen && activeTab?.mode === 'terminal'} directory={terminalTab.targetDirectory} />
+            <TerminalView
+              visible={isOpen && activeTab?.mode === 'terminal'}
+              directory={terminalTab.targetDirectory}
+              onLastTabClosed={() => { if (directoryKey) closeContextPanelTab(directoryKey, terminalTab.id); }}
+            />
           </div>
         ) : null}
         {hasWalkthroughTab ? (
@@ -1446,12 +1529,7 @@ export const ContextPanel: React.FC = () => {
                   <GuestSurfacePane mode={tab.mode} />
                 ) : (
                   <div className={cn('flex h-full', DOCK_LAYOUT[docking.dock].container)}>
-                    <div
-                      className={cn('shrink-0', DOCK_LAYOUT[docking.dock].page)}
-                      style={DOCK_LAYOUT[docking.dock].vertical ? { height: docking.size } : { width: docking.size }}
-                    >
-                      <PluginPane mode={tab.mode} />
-                    </div>
+                    <DockedGuestPage mode={tab.mode} docking={docking} />
                     <div className="min-h-0 min-w-0 flex-1">
                       {surfaceMounted ? <GuestSurfacePane mode={tab.mode} /> : null}
                     </div>

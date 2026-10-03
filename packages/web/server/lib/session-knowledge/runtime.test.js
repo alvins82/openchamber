@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { buildKnowledgeSignature, buildKnowledgeText, createSessionKnowledgeRuntime } from './runtime.js';
+import { SESSION_LINK_GUIDANCE, buildKnowledgeSignature, buildKnowledgeText, createSessionKnowledgeRuntime } from './runtime.js';
 
 const DIRECTORY = '/work/project';
 const PROJECT_ID = 'path_project';
@@ -30,6 +30,7 @@ const createRuntime = (overrides = {}) => createSessionKnowledgeRuntime({
   ...('readSessionMetadata' in overrides ? { readSessionMetadata: overrides.readSessionMetadata } : {}),
   ...('persistSessionMetadata' in overrides ? { persistSessionMetadata: overrides.persistSessionMetadata } : {}),
   ...('isAgentMemoryEnabled' in overrides ? { isAgentMemoryEnabled: overrides.isAgentMemoryEnabled } : {}),
+  ...('isSessionLinkingAvailable' in overrides ? { isSessionLinkingAvailable: overrides.isSessionLinkingAvailable } : {}),
 });
 
 /** An in-memory stand-in for `session-metadata-store.js`. */
@@ -46,6 +47,32 @@ const createMetadataStub = (initial = {}) => {
     },
   };
 };
+
+describe('when to link', () => {
+  const empty = { notes: [], plans: [], memory: { global: [], project: [], enabled: false, complete: false } };
+
+  test('is told in a session whose agent has the tool, even with nothing else to tell', async () => {
+    const runtime = createRuntime({
+      isSessionLinkingAvailable: async () => true,
+      isAgentMemoryEnabled: async () => false,
+      projectContextRuntime: { readContext: async () => ({ notes: [], todos: [], plans: [] }) },
+    });
+    const { text, signature } = await runtime.resolvePending(DIRECTORY, '', { notes: [], plans: [] });
+
+    expect(text).toBe(SESSION_LINK_GUIDANCE);
+    expect(signature).toBe('l:on');
+    expect((await runtime.resolvePending(DIRECTORY, signature, { notes: [], plans: [] })).text).toBe('');
+  });
+
+  test('is left out without the tool, or when the check fails', async () => {
+    for (const isSessionLinkingAvailable of [async () => false, async () => { throw new Error('settings unreadable'); }]) {
+      const { text } = await createRuntime({ isSessionLinkingAvailable }).resolvePending(DIRECTORY, '', PINS);
+      expect(text).not.toContain(SESSION_LINK_GUIDANCE);
+    }
+    expect(buildKnowledgeText(empty)).toBe('');
+    expect(buildKnowledgeSignature(empty)).toBe('');
+  });
+});
 
 describe('what the session is owed', () => {
   test('carries pinned notes, pinned plan bodies, and the memory index', async () => {
@@ -75,7 +102,19 @@ describe('what the session is owed', () => {
     expect(text).not.toContain('Pinned note body.');
   });
 
-  test('nothing pinned and nothing remembered owes nothing', async () => {
+  test('nothing pinned with memory off owes nothing', async () => {
+    const runtime = createRuntime({
+      projectContextRuntime: { readContext: async () => ({ notes: [], todos: [], plans: [] }) },
+      isAgentMemoryEnabled: async () => false,
+    });
+
+    const { text, signature } = await runtime.resolvePending(DIRECTORY, '');
+
+    expect(signature).toBe('');
+    expect(text).toBe('');
+  });
+
+  test('an empty memory store still tells the session when to save', async () => {
     const runtime = createRuntime({
       projectContextRuntime: { readContext: async () => ({ notes: [], todos: [], plans: [] }) },
       agentMemoryRuntime: {
@@ -83,10 +122,25 @@ describe('what the session is owed', () => {
       },
     });
 
-    const { text, signature } = await runtime.resolvePending(DIRECTORY, '');
+    const first = await runtime.resolvePending(DIRECTORY, '');
+    expect(first.text).toContain('Save to it in the moment');
+    expect(first.text).toContain('Nothing is stored yet.');
 
-    expect(signature).toBe('');
-    expect(text).toBe('');
+    const again = await runtime.resolvePending(DIRECTORY, first.signature);
+    expect(again.text).toBe('');
+  });
+
+  test('a memory store that failed to load is not called empty', async () => {
+    const runtime = createRuntime({
+      projectContextRuntime: { readContext: async () => ({ notes: [], todos: [], plans: [] }) },
+      agentMemoryRuntime: {
+        readAll: async () => ({ global: [], project: [], globalFailed: true, projectFailed: false }),
+      },
+    });
+
+    const { text } = await runtime.resolvePending(DIRECTORY, '');
+    expect(text).toContain('Save to it in the moment');
+    expect(text).not.toContain('Nothing is stored yet.');
   });
 });
 

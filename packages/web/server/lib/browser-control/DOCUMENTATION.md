@@ -46,8 +46,27 @@ itself; it can only ask and wait.
   `browser.*` actions of the `openchamber_web` tool onto the router's
   `request()` (same signature as the broker) and owns their parameter
   validation.
-- The client half is `packages/ui/src/lib/browser/controlClient.ts`, which
-  registers the mounted browser pane as the one responder.
+- The client half is `packages/ui/src/lib/browser/controlClient.ts`. Every
+  mounted browser tab registers its pane under its context-panel tab id. An
+  action with `tabId` runs in that tab; without one it runs in the browser tab
+  the user last had in front of them (`setShownBrowserTab`, set by
+  `ContextPanel`), never in whichever pane registered last, and never switches
+  the user to the tab it acts in. `browser.open` without `tabId` never
+  navigates an existing tab: the registered opener (`ContextPanel`,
+  `useUIStore.openAgentBrowserTab`) makes a new background tab and the answer
+  carries its `tabId`. `browser.snapshot` answers carry `tabs`
+  (`id`, `title`, `url`, `active`). A client without the named tab waits
+  briefly, so the client that has it claims first, then claims and answers
+  "no such tab". A tab restored from a previous run has no pane until it is
+  shown or used, so `ContextPanel` registers it as sleeping
+  (`registerSleepingBrowserTab`): it is listed in `tabs` without being loaded,
+  and an action that lands on it wakes it after the claim and waits for its
+  pane. `browser.capture` never opens the panel or switches its tab: a hidden
+  pane is drawn at zero opacity inside the window for the screenshot, because
+  Chromium composites a transparent webview but not a hidden or clipped one.
+  `tabId` is validated and passed through by
+  `../openchamber-control/service.js` for every action, so an extension
+  provider receives it untouched (`BrowserTabTarget` in `@openchamber/sdk`).
 
 ## Invariants
 

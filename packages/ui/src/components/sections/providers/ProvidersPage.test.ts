@@ -6,6 +6,9 @@ import {
   getCredentialConnections,
   getKeyMethod,
   getOAuthMethods,
+  getProviderConnections,
+  getProviderCardStatus,
+  getSignInIntegrationId,
   providerHasCredentials,
   shouldAutoOpenAuthPanel,
   shouldShowApiKeyAuth,
@@ -76,6 +79,23 @@ describe('integration method helpers', () => {
     expect(getCredentialConnections(integration({ connections: [credential, envConnection] })))
       .toEqual([credential]);
     expect(getCredentialConnections(integration({ connections: [envConnection] }))).toEqual([]);
+  });
+});
+
+describe('Console sign-in for OpenCode Go', () => {
+  test('OpenCode Go signs in through the Console integration; others use their own', () => {
+    expect(getSignInIntegrationId('opencode-go')).toBe('opencode');
+    expect(getSignInIntegrationId('anthropic')).toBe('anthropic');
+  });
+
+  test('a Console sign-in counts as OpenCode Go credentials', () => {
+    const list = [
+      integration({ id: 'opencode-go', name: 'OpenCode Go' }),
+      integration({ id: 'opencode', name: 'OpenCode Console', connections: [credential] }),
+    ];
+    expect(getProviderConnections(list, 'opencode-go')).toEqual([credential]);
+    expect(getProviderConnections(list, 'anthropic')).toBe(undefined);
+    expect(getProviderConnections([integration({ connections: [envConnection] })], 'anthropic')).toEqual([envConnection]);
   });
 });
 
@@ -193,5 +213,38 @@ describe('provider credential state helpers', () => {
       integrationsLoaded: false,
       hasCredentials: false,
     })).toBe(true);
+  });
+});
+
+describe('getProviderCardStatus', () => {
+  const second: ConnectionInfo = { type: 'credential', id: 'cred_2', label: 'Work', method: 'oauth' };
+  const status = (integrations: IntegrationInfo[] | null, optionsApiKey?: string | null) =>
+    getProviderCardStatus({ integrations, providerId: 'anthropic', optionsApiKey });
+
+  test('shows nothing until integrations load', () => {
+    expect(status(null)).toBe(null);
+  });
+
+  test('counts accounts only when there is more than one to switch between', () => {
+    expect(status([integration({ connections: [credential, second, envConnection] })])).toEqual({ kind: 'accounts', count: 2 });
+    expect(status([integration({ connections: [credential, envConnection] })])).toEqual({ kind: 'connected' });
+  });
+
+  test('an inline config key counts as connected', () => {
+    expect(status([integration()], 'sk-inline')).toEqual({ kind: 'connected' });
+  });
+
+  test('separates environment-only connections from missing sign-in', () => {
+    expect(status([integration({ connections: [envConnection] })])).toEqual({ kind: 'environment' });
+    expect(status([integration()])).toEqual({ kind: 'signInNeeded' });
+  });
+
+  test('a connection OpenCode flagged for a new sign-in outranks every other status', () => {
+    const expired: ConnectionInfo = { ...second, status: { status: 'needs_auth', message: 'Signed out of OpenCode Console.' } };
+    expect(status([integration({ connections: [credential, expired] })])).toEqual({ kind: 'reauthNeeded' });
+  });
+
+  test('a provider with no integration gets no status instead of a false warning', () => {
+    expect(status([integration({ id: 'openai' })])).toBe(null);
   });
 });

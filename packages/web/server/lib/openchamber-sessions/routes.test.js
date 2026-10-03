@@ -23,6 +23,7 @@ const sessionCreateMock = vi.fn(async () => ({ id: 'ses_123' }));
 const sessionForkMock = vi.fn(async () => ({ id: 'ses_fork', title: 'Forked session' }));
 const sessionMessagesMock = vi.fn(async () => ({ data: [] }));
 const sessionGetMock = vi.fn(async ({ sessionID }) => ({ id: sessionID, location: { directory: '/repo/app' } }));
+const sessionUpdateMock = vi.fn(async () => undefined);
 const sessionPromptMock = vi.fn(async () => ({ id: 'msg_dispatched' }));
 const sessionSyntheticMock = vi.fn(async () => ({ id: 'msg_synthetic' }));
 const sessionSwitchModelMock = vi.fn(async () => undefined);
@@ -77,7 +78,7 @@ globalThis.__openchamberGetWorktreeBootstrapStatusMock = getWorktreeBootstrapSta
 
 let registerOpenChamberSessionRoutes;
 let createSessionMetadataStore;
-let createUpstreamSessionMetadataReader;
+let createOpenCodeSessionMetadata;
 
 // Every `OpenCode.make` call is recorded so tests can assert on the scoping
 // headers the routes build.
@@ -92,6 +93,7 @@ vi.mock('@opencode/client', () => ({
           create: sessionCreateMock,
           fork: sessionForkMock,
           get: sessionGetMock,
+          update: sessionUpdateMock,
           command: sessionCommandMock,
           prompt: sessionPromptMock,
           synthetic: sessionSyntheticMock,
@@ -206,7 +208,7 @@ const createApp = (overrides = {}, options = {}) => {
 describe('openchamber session routes', () => {
   beforeAll(async () => {
     ({ registerOpenChamberSessionRoutes } = await import('./routes.js'));
-    ({ createSessionMetadataStore, createUpstreamSessionMetadataReader } = await import('./session-metadata-store.js'));
+    ({ createSessionMetadataStore, createOpenCodeSessionMetadata } = await import('./session-metadata-store.js'));
   });
 
   beforeEach(() => {
@@ -219,6 +221,7 @@ describe('openchamber session routes', () => {
       updatedAt: Date.now(),
     }));
     sessionCreateMock.mockClear();
+    sessionUpdateMock.mockClear();
     sessionForkMock.mockClear();
     existingSessionMessages = [];
     dispatchedUserMessageSeq = 0;
@@ -337,19 +340,18 @@ describe('openchamber session routes', () => {
   });
 
   describe('session metadata OpenChamber owns', () => {
-    it('seeds the store from what v1 left on the OpenCode record before the first patch', async () => {
+    it('merges a patch onto the OpenCode record and writes it back with PATCH', async () => {
       sessionGetMock.mockImplementationOnce(async ({ sessionID }) => ({
         id: sessionID,
         location: { directory: '/repo/app' },
         metadata: { openchamber: { kind: 'review', assist: { recap: 'from v1' } } },
       }));
-      // The real store, reading OpenCode through the same mocked client the
-      // routes use: seeding is the store's job, not the route's.
+      // The real store over the same mocked client the routes use.
       const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'openchamber-routes-metadata-'));
-      const { app, sessionMetadataStore } = createApp({
+      const { app } = createApp({
         sessionMetadataStore: createSessionMetadataStore({
           dataDir,
-          readUpstreamMetadata: createUpstreamSessionMetadataReader({
+          openCode: createOpenCodeSessionMetadata({
             buildOpenCodeUrl: (route) => `http://opencode.test${route}`,
             getOpenCodeAuthHeaders: () => ({ Authorization: 'Bearer test' }),
           }),
@@ -361,18 +363,9 @@ describe('openchamber session routes', () => {
         .send({ patch: { openchamber: { goal: { status: 'active' } } } })
         .expect(200);
 
-      // The goal joined the v1 data instead of replacing it.
-      expect(response.body.metadata).toEqual({
-        openchamber: { kind: 'review', assist: { recap: 'from v1' }, goal: { status: 'active' } },
-      });
-      await expect(sessionMetadataStore.get('ses_v1')).resolves.toEqual(response.body.metadata);
-      // Seeding happens once: the next write does not consult OpenCode again.
-      sessionGetMock.mockClear();
-      await request(app)
-        .post('/api/openchamber/sessions/ses_v1/metadata')
-        .send({ patch: { openchamber: { goal: { status: 'paused' } } } })
-        .expect(200);
-      expect(sessionGetMock).not.toHaveBeenCalled();
+      const merged = { openchamber: { kind: 'review', assist: { recap: 'from v1' }, goal: { status: 'active' } } };
+      expect(response.body.metadata).toEqual(merged);
+      expect(sessionUpdateMock).toHaveBeenCalledWith({ sessionID: 'ses_v1', metadata: merged });
       fs.rmSync(dataDir, { recursive: true, force: true });
     });
 
@@ -839,6 +832,29 @@ describe('openchamber session routes', () => {
     expect(sessionPromptMock).not.toHaveBeenCalled();
   });
 
+  it('admits standing project context ahead of a dispatched slash command', async () => {
+    commandListMock.mockResolvedValue({ data: [{ name: 'review', description: 'Review' }] });
+    const recordDelivered = vi.fn(async () => undefined);
+    const sessionKnowledgeRuntime = {
+      resolvePendingForSession: vi.fn(async () => ({ text: 'Memory guidance', signature: 'sig_1' })),
+      recordDelivered,
+    };
+
+    const { app } = createApp({ sessionKnowledgeRuntime });
+    await request(app)
+      .post('/api/openchamber/sessions/ses_source/send')
+      .send({ directory: '/repo/app', prompt: '/review', model: 'openai/gpt-5.5', agent: 'build' })
+      .expect(200);
+
+    expect(sessionSyntheticMock).toHaveBeenCalledWith(expect.objectContaining({
+      text: 'Memory guidance',
+      resume: false,
+    }));
+    expect(sessionSyntheticMock.mock.invocationCallOrder[0])
+      .toBeLessThan(sessionCommandMock.mock.invocationCallOrder[0]);
+    expect(recordDelivered).toHaveBeenCalledWith('ses_source', '/repo/app', 'sig_1');
+  });
+
   it('reuses the previous session selection when send omits model, agent, and variant', async () => {
     // v2 keeps the selection on the session record, so the history is no longer
     // walked for it.
@@ -904,6 +920,24 @@ describe('openchamber session routes', () => {
     }));
   });
 
+  it('strips source-owned links from a fork before dispatching', async () => {
+    sessionForkMock.mockImplementationOnce(async () => ({
+      id: 'ses_fork',
+      title: 'Forked session',
+      metadata: { openchamber: { btwSessionID: 'ses_btw', reviewSessionID: 'ses_review', assist: { recap: 'kept' } } },
+    }));
+    const { app, sessionMetadataStore } = createApp();
+    sessionMetadataStore.entries.set('ses_fork', {
+      openchamber: { btwSessionID: 'ses_btw', reviewSessionID: 'ses_review', assist: { recap: 'kept' } },
+    });
+    await request(app)
+      .post('/api/openchamber/sessions/ses_source/fork')
+      .send({ directory: '/repo/app', prompt: 'Carry on', model: 'openai/gpt-5.5', agent: 'build' })
+      .expect(200);
+
+    expect(sessionMetadataStore.entries.get('ses_fork')).toEqual({ openchamber: { assist: { recap: 'kept' } } });
+  });
+
   it('rejects send and fork requests without a prompt before calling OpenCode', async () => {
     const { app } = createApp();
     await request(app)
@@ -964,6 +998,46 @@ describe('openchamber session routes', () => {
     expect(sessionSwitchModelMock).toHaveBeenCalledWith({
       sessionID: 'ses_source',
       model: { id: 'requested', providerID: 'openai' },
+    });
+  });
+
+  it('applies the config default model variant when the prompt omits a model', async () => {
+    useCatalog({
+      config: [{
+        type: 'document',
+        info: { model: { providerID: 'openai', model: 'gpt-5.5', variant: 'high' } },
+      }],
+    });
+    const { app } = createApp();
+    const response = await request(app)
+      .post('/api/openchamber/sessions')
+      .send({ directory: '/repo/app', prompt: 'Run this' })
+      .expect(200);
+
+    expect(response.body.model).toEqual({ providerID: 'openai', modelID: 'gpt-5.5' });
+    expect(sessionSwitchModelMock).toHaveBeenCalledWith({
+      sessionID: 'ses_123',
+      model: { id: 'gpt-5.5', providerID: 'openai', variant: 'high' },
+    });
+  });
+
+  it('applies the config default model variant from the string spelling', async () => {
+    useCatalog({
+      config: [{
+        type: 'document',
+        info: { model: 'openai/gpt-5.5#high' },
+      }],
+    });
+    const { app } = createApp();
+    const response = await request(app)
+      .post('/api/openchamber/sessions')
+      .send({ directory: '/repo/app', prompt: 'Run this' })
+      .expect(200);
+
+    expect(response.body.model).toEqual({ providerID: 'openai', modelID: 'gpt-5.5' });
+    expect(sessionSwitchModelMock).toHaveBeenCalledWith({
+      sessionID: 'ses_123',
+      model: { id: 'gpt-5.5', providerID: 'openai', variant: 'high' },
     });
   });
 
@@ -1032,5 +1106,36 @@ describe('openchamber session routes', () => {
 
     expect(sessionCommandMock).toHaveBeenCalledTimes(1);
     expect(sessionPromptMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('openchamber session service directory resolution', () => {
+  const createService = async (overrides = {}) => {
+    const { createOpenChamberSessionService } = await import('./routes.js');
+    return createOpenChamberSessionService({
+      archiveStore: createMemoryArchiveStore(),
+      sessionMetadataStore: createMemorySessionMetadataStore(),
+      readSettingsFromDiskMigrated: async () => ({ projects: [{ id: 'proj_1', path: '/repo/app' }] }),
+      sanitizeProjects: (projects) => projects,
+      validateDirectoryPath: async (directory) => ({ ok: true, directory }),
+      buildOpenCodeUrl: (route) => `http://opencode.test${route}`,
+      getOpenCodeAuthHeaders: () => ({}),
+      ...overrides,
+    });
+  };
+
+  it('resolves a registered project to its directory', async () => {
+    const service = await createService();
+    await expect(service.resolveDirectory({ projectId: 'proj_1' })).resolves.toBe('/repo/app');
+  });
+
+  it('fails for an unknown project, a missing project folder, or unreadable settings', async () => {
+    await expect((await createService()).resolveDirectory({ projectId: 'missing' }))
+      .rejects.toMatchObject({ statusCode: 404, message: 'Project not found' });
+    const goneFolder = await createService({ validateDirectoryPath: async () => ({ ok: false, error: 'Directory not found' }) });
+    await expect(goneFolder.resolveDirectory({ projectId: 'proj_1' }))
+      .rejects.toMatchObject({ statusCode: 400, message: 'Directory not found' });
+    const unreadable = await createService({ readSettingsFromDiskMigrated: async () => { throw new Error('settings unreadable'); } });
+    await expect(unreadable.resolveDirectory({ projectId: 'proj_1' })).rejects.toThrow('settings unreadable');
   });
 });

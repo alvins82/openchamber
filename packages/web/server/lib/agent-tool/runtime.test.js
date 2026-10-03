@@ -249,6 +249,36 @@ describe('managed agent tool runtime', () => {
     expect(Object.keys(tool)).toEqual(['openchamber_memory']);
   });
 
+  it('exposes notify as its own tool only when switched on', async () => {
+    const { runtime, dataDir } = await createRuntime();
+    await prepareManagedEnv(runtime, { includeControl: true, includeWeb: false, includeMemory: false, includeNotify: true });
+    const tool = await loadTools(dataDir, 'notify');
+
+    expect(Object.keys(tool)).toEqual(['openchamber', 'openchamber_notify']);
+    expect(Object.keys(tool.openchamber_notify.input.properties.parameters.properties).sort())
+      .toEqual(['body', 'showWhenFocused', 'title']);
+    expect(Object.keys(tool.openchamber.input.properties.parameters.properties)).not.toContain('showWhenFocused');
+
+    const { runtime: plain, dataDir: plainDir } = await createRuntime();
+    await prepareManagedEnv(plain, { includeControl: true, includeWeb: false, includeMemory: false });
+    expect(Object.keys(await loadTools(plainDir, 'nonotify'))).toEqual(['openchamber']);
+  });
+
+  it('registers every tool as a direct tool unless Code Mode is asked for', async () => {
+    const { runtime, dataDir } = await createRuntime();
+    await prepareManagedEnv(runtime, { includeControl: true, includeWeb: true, includeMemory: true, includeNotify: true });
+    const direct = await loadTools(dataDir, 'direct');
+    for (const tool of Object.values(direct)) {
+      expect(tool.options).toEqual({ codemode: false });
+    }
+
+    await prepareManagedEnv(runtime, { includeControl: true, includeWeb: true, includeMemory: true, includeNotify: true, codeMode: true });
+    const behindExecute = await loadTools(dataDir, 'codemode');
+    for (const tool of Object.values(behindExecute)) {
+      expect(tool.options).toEqual({ codemode: true });
+    }
+  });
+
   it('refuses to inject a plugin with no tools in it', async () => {
     const { runtime } = await createRuntime();
     let failed = false;

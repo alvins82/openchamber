@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import type { ConfigEntry, SessionInfo, SessionMessageAssistant, SessionMessageInfo } from "@opencode/client"
 
-import { partIds } from "./model"
+import { partIds, type ConfigDocument } from "./model"
 import {
+  configModelIdentifier,
+  deniesAnyProvider,
   mergeConfigDocuments,
   projectAgent,
   projectAssistantContent,
@@ -268,6 +270,45 @@ describe("mergeConfigDocuments", () => {
 
   test("no documents yields an empty config", () => {
     expect(mergeConfigDocuments([])).toEqual({})
+  })
+})
+
+describe("configModelIdentifier", () => {
+  test("keeps the identifier spelling of both served forms", () => {
+    expect(configModelIdentifier("openai/gpt-5.5")).toBe("openai/gpt-5.5")
+    expect(configModelIdentifier("openai/gpt-5.5#xhigh")).toBe("openai/gpt-5.5#xhigh")
+    expect(configModelIdentifier({ providerID: "openai", model: "gpt-5.5" })).toBe("openai/gpt-5.5")
+    expect(configModelIdentifier({ providerID: "openai", model: "gpt-5.5", variant: "xhigh" })).toBe("openai/gpt-5.5#xhigh")
+  })
+
+  test("rejects malformed or incomplete selections", () => {
+    expect(configModelIdentifier(undefined)).toBeUndefined()
+    expect(configModelIdentifier("gpt-5.5")).toBeUndefined()
+    expect(configModelIdentifier({ providerID: "", model: "gpt-5.5" })).toBeUndefined()
+    expect(configModelIdentifier({ providerID: "openai", model: "" })).toBeUndefined()
+  })
+})
+
+describe("deniesAnyProvider", () => {
+  const doc = (path: string, experimental?: ConfigDocument["info"]["experimental"]): ConfigEntry =>
+    ({ type: "document", path, info: experimental ? { experimental } : {} })
+
+  test("sees a provider.use deny in any layer, even when a later document has its own experimental block", () => {
+    const entries = [
+      doc("/home/u/.config/opencode/opencode.json", { policies: [{ action: "provider.use", resource: "*", effect: "deny" }] }),
+      doc("/repo/opencode.json", { policies: [{ action: "permission", resource: "shell:*", effect: "deny" }] }),
+    ]
+    expect(deniesAnyProvider(entries)).toBe(true)
+  })
+
+  test("an allow or a permission policy alone is no restriction", () => {
+    expect(deniesAnyProvider([
+      doc("/repo/opencode.json", { policies: [
+        { action: "provider.use", resource: "anthropic", effect: "allow" },
+        { action: "permission", resource: "shell:*", effect: "deny" },
+      ] }),
+    ])).toBe(false)
+    expect(deniesAnyProvider([doc("/repo/opencode.json")])).toBe(false)
   })
 })
 

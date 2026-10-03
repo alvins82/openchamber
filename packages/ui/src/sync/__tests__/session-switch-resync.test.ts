@@ -1,6 +1,6 @@
-import { describe, expect, test, beforeEach, mock } from "bun:test"
+import { describe, expect, test, afterEach, beforeEach, mock } from "bun:test"
 import { create, type StoreApi } from "zustand"
-import type { SyncEvent } from "@/lib/opencode/events"
+import type { SyncEvent, ToolTransition } from "@/lib/opencode/events"
 import type { FormRequest, PermissionRequest } from "@/lib/opencode/model"
 
 const listPendingFormsCalls: Array<{ directories?: Array<string | null | undefined> }> = []
@@ -28,13 +28,25 @@ mock.module("@/lib/opencode/client", () => ({
   },
 }))
 
-const autoAcceptSnapshots: Array<{ snapshot: { sessions: Record<string, boolean>; revision?: number }; runtimeKey?: string }> = []
+const autoAcceptSnapshots: Array<{ snapshot: { modes: Record<string, string>; revision?: number }; runtimeKey?: string }> = []
+
+// The mode the mocked permission store reports for every session, and whether
+// a classification provider can run the safety net.
+let sessionMode = "ask"
+let safetyNetAvailable = true
+
+mock.module("@/stores/useRoutingStore", () => ({
+  useRoutingStore: {
+    getState: () => ({ available: true, jevAvailable: safetyNetAvailable, releasePermission: () => undefined }),
+  },
+  selectSafetyNetAvailable: (state: { available: boolean; jevAvailable: boolean }) => state.available && state.jevAvailable,
+}))
 
 mock.module("@/stores/permissionStore", () => ({
   usePermissionStore: {
     getState: () => ({
-      isSessionAutoAccepting: () => false,
-      applySnapshot: (snapshot: { sessions: Record<string, boolean>; revision?: number }, runtimeKey?: string) => {
+      getSessionMode: () => sessionMode,
+      applySnapshot: (snapshot: { modes: Record<string, string>; revision?: number }, runtimeKey?: string) => {
         autoAcceptSnapshots.push({ snapshot, runtimeKey })
       },
     }),
@@ -54,6 +66,7 @@ mock.module("@/contexts/runtimeAPIRegistry", () => ({
 }))
 
 mock.module("@/stores/useConfigStore", () => ({
+  markConfigCatalogStale: () => undefined,
   useConfigStore: {
     getState: () => ({ isConnected: true, hasEverConnected: true }),
     setState: () => undefined,
@@ -305,26 +318,26 @@ describe("resyncBlockingRequestsForDirectory", () => {
     expect(listPendingPermissionsCalls).toHaveLength(1)
   })
 
-  test("refreshes Git once when a live mutating tool completes between renders", () => {
+  test("refreshes Git once when a mutating tool settles, from a snapshot or a live transition", () => {
     const childStores = new ChildStoreManager()
     childStores.ensureChild("/repo", { bootstrap: false })
     const routingIndex = createEventRoutingIndex()
     const refreshes: Array<{ directory: string; paths?: string[] }> = []
     const unsubscribe = sessionEvents.onGitRefreshHint((hint) => refreshes.push(hint))
+    const toolState = (status: "pending" | "running" | "completed") => {
+      if (status === "pending") return { status, input: {}, raw: "" }
+      if (status === "running") return { status, input: {}, time: { start: 1 } }
+      return { status, input: {}, output: "", metadata: {}, time: { start: 1, end: 2 } }
+    }
     // SAFETY: this fixture supplies the sync event discriminator and the tool
     // part identity, tool name, and state fields consumed by the reducer.
-    const toolState = (status: "pending" | "completed" | "error") => {
-      if (status === "pending") return { status, input: {}, raw: "" }
-      if (status === "completed") return { status, input: {}, output: "", metadata: {}, time: { start: 1, end: 2 } }
-      return { status, input: {}, error: "boom", metadata: {}, time: { start: 1, end: 2 } }
-    }
-    const toolEvent = (tool: string, status: "pending" | "completed" | "error") => ({
+    const partEvent = (partID: string, tool: string, status: "pending" | "running" | "completed") => ({
       type: "message.part.updated",
       properties: {
         sessionID: "ses_a",
         part: {
-          id: "prt_tool",
-          callID: "prt_tool",
+          id: partID,
+          callID: partID,
           messageID: "msg_assistant",
           sessionID: "ses_a",
           type: "tool",
@@ -333,15 +346,30 @@ describe("resyncBlockingRequestsForDirectory", () => {
         },
       },
     }) as SyncEvent
+    // SAFETY: same fixture contract for the live v2 transition frame.
+    const transitionEvent = (partID: string, transition: ToolTransition) => ({
+      type: "message.tool.transition",
+      properties: { sessionID: "ses_a", messageID: "msg_assistant", partID, transition },
+    }) as SyncEvent
+    const send = (event: SyncEvent) => handleEvent("/repo", event, childStores, routingIndex, getRuntimeKey())
 
     try {
-      handleEvent("/repo", toolEvent("apply_patch", "pending"), childStores, routingIndex, getRuntimeKey())
-      handleEvent("/repo", toolEvent("apply_patch", "completed"), childStores, routingIndex, getRuntimeKey())
-      handleEvent("/repo", toolEvent("apply_patch", "completed"), childStores, routingIndex, getRuntimeKey())
-      handleEvent("/repo", toolEvent("read", "completed"), childStores, routingIndex, getRuntimeKey())
-      handleEvent("/repo", toolEvent("edit", "error"), childStores, routingIndex, getRuntimeKey())
-
+      // Snapshot path: a completed `patch` refreshes once, a repeat and a read do not.
+      send(partEvent("prt_patch", "patch", "pending"))
+      send(partEvent("prt_patch", "patch", "completed"))
+      send(partEvent("prt_patch", "patch", "completed"))
+      send(partEvent("prt_read", "read", "completed"))
       expect(refreshes).toEqual([{ directory: "/repo" }])
+
+      // Live path: OpenCode v2 settles a running shell call through a transition.
+      send(partEvent("prt_shell", "shell", "running"))
+      send(transitionEvent("prt_shell", { kind: "success", executed: true, output: "", end: 2 }))
+      expect(refreshes).toHaveLength(2)
+
+      // A failed edit may still have written the file.
+      send(partEvent("prt_edit", "edit", "running"))
+      send(transitionEvent("prt_edit", { kind: "failed", executed: true, error: "boom", end: 2 }))
+      expect(refreshes).toHaveLength(3)
     } finally {
       unsubscribe()
       childStores.disposeAll()
@@ -407,12 +435,114 @@ describe("OpenChamber-native frames", () => {
       handleEvent("global", event, childStores, routingIndex, getRuntimeKey())
 
       expect(autoAcceptSnapshots).toEqual([{
-        snapshot: { sessions: { ses_a: true, ses_b: false }, revision: 7 },
+        // A policy from before the modes reads on as auto and off as ask.
+        snapshot: { modes: { ses_a: "auto", ses_b: "ask" }, revision: 7 },
         runtimeKey: getRuntimeKey(),
       }])
       expect(childStores.children.size).toBe(0)
     } finally {
       childStores.disposeAll()
     }
+  })
+})
+
+// In a session the server may answer on its own, a request stays out of sight
+// until the server says it left the request for the user, so an accepted one
+// never flashes a card and a held one is never lost.
+describe("permission.asked in a session the server may answer", () => {
+  const leftForUser = (permissionId: string, directory: string | null = "/repo"): SyncEvent => ({
+    type: "openchamber.permission-left-for-user",
+    properties: { permissionId, sessionId: "ses_a", directory },
+  })
+  const asked = (id: string): SyncEvent => ({ type: "permission.asked", properties: buildPermission({ id }) })
+  const replied = (requestID: string): SyncEvent => ({ type: "permission.replied", properties: { sessionID: "ses_a", requestID } })
+
+  const withDirectory = (
+    options: { store: boolean },
+    run: (send: (event: SyncEvent) => void, storedIds: () => string[] | undefined) => void,
+  ) => {
+    const childStores = new ChildStoreManager()
+    if (options.store) childStores.ensureChild("/repo", { bootstrap: false })
+    const routingIndex = createEventRoutingIndex()
+    try {
+      run(
+        (event) => handleEvent("/repo", event, childStores, routingIndex, getRuntimeKey()),
+        () => childStores.getChild("/repo")?.getState().permission.ses_a?.map((entry) => entry.id),
+      )
+    } finally {
+      childStores.disposeAll()
+    }
+  }
+
+  beforeEach(() => {
+    infoToasts.length = 0
+    sessionMode = "safety"
+    safetyNetAvailable = true
+  })
+
+  afterEach(() => {
+    sessionMode = "ask"
+  })
+
+  test("keeps the request out of sight only while the server can answer it", () => {
+    const cases = [
+      { mode: "auto", net: true, shown: false },
+      { mode: "safety", net: true, shown: false },
+      { mode: "safety", net: false, shown: true },
+      { mode: "ask", net: true, shown: true },
+    ]
+    for (const { mode, net, shown } of cases) {
+      sessionMode = mode
+      safetyNetAvailable = net
+      infoToasts.length = 0
+      const id = `perm_${mode}_${net}`
+      withDirectory({ store: true }, (send, storedIds) => {
+        send(asked(id))
+        expect(storedIds()).toEqual(shown ? [id] : undefined)
+        expect(infoToasts).toHaveLength(shown ? 1 : 0)
+      })
+    }
+  })
+
+  test("shows a request the server left for the user, once", () => {
+    withDirectory({ store: true }, (send, storedIds) => {
+      send(asked("perm_held"))
+      send(leftForUser("perm_held"))
+      expect(storedIds()).toEqual(["perm_held"])
+      expect(infoToasts).toHaveLength(1)
+
+      // Reconnect reconciliation reports a still-held request again.
+      send(leftForUser("perm_held"))
+      expect(storedIds()).toEqual(["perm_held"])
+      expect(infoToasts).toHaveLength(1)
+    })
+  })
+
+  test("forgets a request answered before the server reported on it", () => {
+    withDirectory({ store: true }, (send, storedIds) => {
+      send(asked("perm_accepted"))
+      send(replied("perm_accepted"))
+      send(leftForUser("perm_accepted"))
+      expect(storedIds()).toBeUndefined()
+      expect(infoToasts).toHaveLength(0)
+    })
+  })
+
+  test("shows at once a request whose report arrived first", () => {
+    withDirectory({ store: true }, (send, storedIds) => {
+      send(leftForUser("perm_early"))
+      send(asked("perm_early"))
+      expect(storedIds()).toEqual(["perm_early"])
+      expect(infoToasts).toHaveLength(1)
+    })
+  })
+
+  test("announces a held request in a directory without a store", () => {
+    withDirectory({ store: false }, (send) => {
+      send(asked("perm_unopened"))
+      expect(infoToasts).toHaveLength(0)
+      send(leftForUser("perm_unopened"))
+      expect(infoToasts).toHaveLength(1)
+    })
   })
 })

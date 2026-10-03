@@ -237,7 +237,7 @@ const SESSION_LIST_ALLOWED_FIELDS = [
   'fork',
 ];
 
-const sanitizeSessionListItem = (session) => {
+export const sanitizeSessionListItem = (session) => {
   if (!session || typeof session !== 'object' || Array.isArray(session)) {
     return session;
   }
@@ -301,12 +301,18 @@ export const registerOpenCodeProxy = (app, deps) => {
     getSseUpstreamStallTimeoutMs = () => SSE_UPSTREAM_STALL_TIMEOUT_MS,
     readWorktreeBootstrapStatus = getWorktreeBootstrapStatus,
     WORKTREE_READY_TIMEOUT_MS = 5 * 60 * 1000,
-    // OpenCode 2.x has no archive route and no session-metadata update route,
-    // so both are OpenChamber's own. The proxy folds them back onto the
-    // sessions it serves, which is what lets clients keep reading
-    // `time.archived` and `metadata` where they always did.
+    // OpenCode 2.x has no archive route, so archive state is OpenChamber's own
+    // and the proxy folds it onto the sessions it serves (`time.archived`).
+    // Session metadata lives on OpenCode's record; the proxy lays over only
+    // the entries an older OpenChamber left in the legacy file until they are
+    // migrated.
     getArchivedSessions = null,
     getStoredSessionMetadata = null,
+    // Isolated spaces, when the feature's switch is on: the merged session list, and the hub
+    // whose space events the global SSE stream carries beside the host's. Both absent means
+    // the host's own answers go out exactly as before spaces.
+    mergeSpaceSessionList = null,
+    spaceEventHub = null,
   } = deps;
 
   /**
@@ -326,15 +332,16 @@ export const registerOpenCodeProxy = (app, deps) => {
   };
 
   /**
-   * `{ [sessionID]: metadata }` for the current instance, or `null` when the
-   * store cannot answer. `null` means "unknown", and an unknown answer leaves
-   * the upstream record untouched.
+   * `{ [sessionID]: metadata }` still waiting to be migrated to OpenCode, or
+   * `null` when the store cannot answer. `null` means "unknown", and an
+   * unknown answer leaves the upstream record untouched.
    */
   const readStoredSessionMetadata = async () => {
     if (typeof getStoredSessionMetadata !== 'function') return null;
     try {
       const stored = await getStoredSessionMetadata();
-      return stored && typeof stored === 'object' ? stored : null;
+      // Nothing left to migrate is the normal state: skip the rewrite entirely.
+      return stored && typeof stored === 'object' && Object.keys(stored).length > 0 ? stored : null;
     } catch (error) {
       console.warn('[proxy] session metadata unavailable:', error?.message ?? error);
       return null;
@@ -358,8 +365,8 @@ export const registerOpenCodeProxy = (app, deps) => {
   };
 
   /**
-   * The store seeds the full upstream metadata before its first mutation.
-   * Its record is authoritative, including {}, so deleted keys stay deleted.
+   * A legacy entry is the newest metadata its session has, including {}, so it
+   * replaces the upstream record until migration pushes it there.
    */
   const withStoredMetadata = (session, stored) => {
     if (!session || typeof session !== 'object' || typeof session.id !== 'string') return session;
@@ -453,6 +460,9 @@ export const registerOpenCodeProxy = (app, deps) => {
   const replayParsedBody = (proxyReq, req) => {
     const body = serializeParsedBody(req, proxyReq);
     if (!body) return;
+    // http-proxy copies the incoming headers, so a chunked request would reach
+    // OpenCode with both framing headers and be rejected as ambiguous.
+    proxyReq.removeHeader('transfer-encoding');
     proxyReq.setHeader('content-length', String(body.length));
     proxyReq.write(body);
   };
@@ -549,6 +559,7 @@ export const registerOpenCodeProxy = (app, deps) => {
     let heartbeatTimer = null;
     let upstreamStallTimer = null;
     let didUpstreamStall = false;
+    let unsubscribeSpaceEvents = null;
     let writeQueue = Promise.resolve(true);
     const sseBoundary = createSseBoundaryTracker();
 
@@ -643,6 +654,26 @@ export const registerOpenCodeProxy = (app, deps) => {
         return writeQueue;
       };
 
+      // The events of isolated spaces ride the global stream too, one block each, written
+      // only between the upstream's own blocks so a block of the host's is never cut.
+      // A directory in the query or in the header scopes the stream to the host's one directory.
+      const isGlobalStream = !new URL(requestUrl, 'http://localhost').searchParams.get('directory') && !req.get('x-opencode-directory');
+      const pendingSpaceBlocks = [];
+      const flushSpaceBlocks = async () => {
+        while (pendingSpaceBlocks.length > 0 && sseBoundary.isAtBoundary() && !abortController.signal.aborted) {
+          const canContinue = await enqueueSseWrite(pendingSpaceBlocks.shift());
+          if (!canContinue) return false;
+        }
+        return true;
+      };
+      if (spaceEventHub && isGlobalStream) {
+        unsubscribeSpaceEvents = spaceEventHub.subscribeEvent((event) => {
+          if (event.spaceId === null) return;
+          pendingSpaceBlocks.push(`data: ${JSON.stringify(event.payload)}\n\n`);
+          void flushSpaceBlocks();
+        }, { spaces: true });
+      }
+
       scheduleHeartbeat();
       resetUpstreamStallTimer();
 
@@ -657,6 +688,9 @@ export const registerOpenCodeProxy = (app, deps) => {
           sseBoundary.observe(value);
           const canContinue = await enqueueSseWrite(value);
           if (!canContinue) {
+            break;
+          }
+          if (!await flushSpaceBlocks()) {
             break;
           }
         }
@@ -678,6 +712,7 @@ export const registerOpenCodeProxy = (app, deps) => {
         res.end();
       }
     } finally {
+      unsubscribeSpaceEvents?.();
       if (heartbeatTimer) {
         clearTimeout(heartbeatTimer);
         heartbeatTimer = null;
@@ -762,7 +797,13 @@ export const registerOpenCodeProxy = (app, deps) => {
       }
 
       res.setHeader('content-type', result.contentType);
-      res.json(await overlayOwnedStateOnList(sanitizeSessionListPayload(result.payload)));
+      const hostList = await overlayOwnedStateOnList(sanitizeSessionListPayload(result.payload));
+      // The first page of the global list carries every space's sessions after the host's; a
+      // later page, and a list scoped to one directory, are the host's alone.
+      const listQuery = new URL(upstreamPath, 'http://localhost').searchParams;
+      const scopedToDirectory = Boolean(listQuery.get('directory') || req.get('x-opencode-directory'));
+      const wantsSpaces = typeof mergeSpaceSessionList === 'function' && !listQuery.get('cursor') && !scopedToDirectory;
+      res.json(wantsSpaces ? await mergeSpaceSessionList(hostList) : hostList);
     } catch (error) {
       if (isAbortError(error)) {
         return;

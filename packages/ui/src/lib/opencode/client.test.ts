@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test"
+import { z } from "zod"
 
 // The generated `@opencode/client` runs for real here; only the runtime
 // transport (`runtimeFetch`) and runtime identity are replaced. That keeps
@@ -23,7 +24,7 @@ const json = (value: unknown, status = 200) =>
 const noContent = () => new Response(null, { status: 204 })
 
 const runtimeFetchMock = mock<RuntimeFetch>(async (input, init) => {
-  const url = input instanceof URL ? input : new URL(typeof input === "string" ? input : input.url)
+  const url = input instanceof URL ? input : new URL(typeof input === "string" ? input : input.url, "http://runtime.test")
   const request: CapturedRequest = {
     url,
     method: String(init?.method ?? "GET").toUpperCase(),
@@ -43,7 +44,13 @@ const HANG = new Response(null, { status: 599 })
 const hangUntilAborted = (signal: AbortSignal | undefined) =>
   new Promise<Response>((_, reject) => {
     if (!signal) return
-    const abort = () => reject(new DOMException("Aborted", "AbortError"))
+    // A real pending request keeps the event loop alive. AbortSignal.timeout does
+    // not, and Bun on Windows then never fires it, so hold the loop until abort.
+    const pending = setInterval(() => undefined, 1_000)
+    const abort = () => {
+      clearInterval(pending)
+      reject(new DOMException("Aborted", "AbortError"))
+    }
     if (signal.aborted) abort()
     else signal.addEventListener("abort", abort, { once: true })
   })
@@ -74,6 +81,7 @@ mock.module("@/lib/startupTrace", () => ({
 }))
 
 const { OpencodeApiError, createRuntimeOpencodeClient, opencodeClient } = await import(`./client?client-test=${Date.now()}`)
+const { readProjectConfigError } = await import("./configError")
 
 const sessionInfo = {
   id: "ses_1",
@@ -94,6 +102,24 @@ beforeEach(() => {
 })
 
 describe("request fidelity", () => {
+  test("project creation uses the OpenChamber directory route", async () => {
+    responses.push(json({ success: true, restarted: false, path: "/repo/new" }))
+    expect(await opencodeClient.createDirectory("/repo/new", { asProject: true }))
+      .toEqual({ success: true, path: "/repo/new" })
+    expect(requests[0].url.pathname).toBe("/api/openchamber/directory")
+    expect(requests[0].method).toBe("POST")
+    expect(requests[0].body).toEqual({ path: "/repo/new", create: true })
+  })
+
+  test("project activation uses the OpenChamber directory route without creation", async () => {
+    const result = { success: true, restarted: false, path: "/repo/existing" }
+    responses.push(json(result))
+    expect(await opencodeClient.setOpenCodeWorkingDirectory("/repo/existing")).toEqual(result)
+    expect(requests[0].url.pathname).toBe("/api/openchamber/directory")
+    expect(requests[0].method).toBe("POST")
+    expect(requests[0].body).toEqual({ path: "/repo/existing" })
+  })
+
   test("a directory-scoped call carries the encoded directory header and lists that directory", async () => {
     responses.push(json({ data: [sessionInfo], cursor: { next: "c2" } }))
     const page = await opencodeClient.listSessionsPage({ directory: "/repo/app dir" })
@@ -112,6 +138,31 @@ describe("request fidelity", () => {
     await opencodeClient.listSessionsPage({ global: true })
     expect(requests[0].url.searchParams.has("directory")).toBe(false)
     expect(requests[0].headers.has("x-opencode-directory")).toBe(false)
+  })
+
+  test("the active-session snapshot is the host's, except for a directory inside an isolated space", async () => {
+    responses.push(json({ data: { ses_host: { type: "running" } } }))
+    await opencodeClient.getActiveSessionStatuses("/repo/app")
+    expect(requests[0].url.pathname).toBe("/api/session/active")
+    expect(requests[0].headers.has("x-opencode-directory")).toBe(false)
+    responses.push(json({ data: { ses_space: { type: "running" } } }))
+    const statuses = await opencodeClient.getActiveSessionStatuses("/spaces/a1b2c3d4e5f6/app")
+    // The space's directory travels on the request; `runtimeFetch` turns it into the space's prefix.
+    expect(requests[1].url.pathname).toBe("/api/session/active")
+    expect(requests[1].headers.get("x-opencode-directory")).toBe(encodeURIComponent("/spaces/a1b2c3d4e5f6/app"))
+    expect(statuses).toEqual({ ses_space: { type: "busy" } })
+  })
+
+  test("a global page carries the isolated-space marks the host merged in, a directory page never does", async () => {
+    const spaces = [{ id: "a1b2c3d4e5f6", name: "One", state: "stale", sessions: 1, projectDirectory: "/repo/app", directory: "/spaces/a1b2c3d4e5f6/app" }]
+    responses.push(json({ data: [], cursor: {}, spaces }))
+    const page = await opencodeClient.listSessionsPage({ global: true })
+    expect(page.spaces).toEqual([{ id: "a1b2c3d4e5f6", name: "One", state: "stale", projectDirectory: "/repo/app", directory: "/spaces/a1b2c3d4e5f6/app" }])
+    responses.push(json({ data: [], cursor: {}, spaces }))
+    expect((await opencodeClient.listSessionsPage({ directory: "/repo/app" })).spaces).toBeUndefined()
+    // A mark the client cannot read is no mark, not a broken list.
+    responses.push(json({ data: [], cursor: {}, spaces: [{ id: "bad" }] }))
+    expect((await opencodeClient.listSessionsPage({ global: true })).spaces).toBeUndefined()
   })
 test('Windows drive roots remain absolute in directory selection and SDK client identity', () => {
   const previous = opencodeClient.getDirectory();
@@ -149,6 +200,21 @@ test('a drive-root system-info fallback stays absolute', async () => {
 })
 
 describe("error normalisation", () => {
+  test("an invalid project config keeps its path and message reachable", async () => {
+    const body = {
+      name: "ConfigInvalidError",
+      data: { path: "/repo/bad/opencode.json", message: "bad file reference: {file:./.secrets/token} does not exist" },
+    }
+    responses.push(json(body, 400))
+    const error = await opencodeClient.listAgents("/repo/bad").catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(OpencodeApiError)
+    expect(readProjectConfigError(error)).toEqual({
+      name: "ConfigInvalidError",
+      path: "/repo/bad/opencode.json",
+      message: "bad file reference: {file:./.secrets/token} does not exist",
+    })
+  })
+
   test("a tagged error body gets its HTTP status restored", async () => {
     responses.push(json({ _tag: "SessionNotFoundError", sessionID: "ses_x", message: "no such session" }, 404))
     const error = await opencodeClient.getSession("ses_x").catch((e: unknown) => e)
@@ -235,6 +301,21 @@ describe("sendMessage", () => {
     expect(requests.every((r) => r.headers.get("x-opencode-directory") === encodeURIComponent("/repo/app"))).toBe(true)
   })
 
+  test("context ids travel with the synthetic messages and sort below the prompt id", async () => {
+    responses.push(json({ id: "a" }), json({ id: "b" }), json({ id: "c" }))
+    const id = await opencodeClient.sendMessage({
+      id: "ses_1",
+      providerID: "openai",
+      text: "",
+      context: [{ id: "msg_given", text: "first" }, { text: "second" }],
+    })
+    const [first, second] = requests.slice(0, 2).map((request) => request.body)
+    expect(first).toMatchObject({ id: "msg_given", text: "first" })
+    expect(second).toMatchObject({ text: "second" })
+    const mintedID = z.object({ id: z.string().startsWith("msg_") }).parse(second).id
+    expect(mintedID < id).toBe(true)
+  })
+
   test("without a selection change only the prompt is sent, with files as URIs", async () => {
     responses.push(json({ id: "msg_2" }))
     await opencodeClient.sendMessage({
@@ -313,6 +394,94 @@ describe("sendMessage", () => {
       }),
     ).rejects.toThrow("runtime changed")
     expect(requests.map((r) => r.url.pathname)).toEqual(["/api/session/ses_1/synthetic"])
+  })
+})
+
+describe("sendMessage with inline skills", () => {
+  const skillInfo = (id: string, name = id) => ({ id, name, path: `/skills/${id}/SKILL.md`, content: "body" })
+  const instructionFor = (names: readonly string[]) => (names.length ? `use: ${names.join(",")}` : null)
+
+  test("attaches known skills to the prompt by id, without an instruction", async () => {
+    responses.push(json({ location: { directory: "/repo/app" }, data: [skillInfo("deploy"), skillInfo("code-audit", "audit")] }), json({ id: "msg_1" }))
+    await opencodeClient.sendMessage({
+      id: "ses_1",
+      providerID: "openai",
+      text: "/audit then /deploy",
+      messageId: "msg_1",
+      delivery: "steer",
+      directory: "/repo/app",
+      skills: { names: ["audit", "deploy"], instructionFor },
+    })
+    expect(requests.map((r) => `${r.method} ${r.url.pathname}`)).toEqual(["GET /api/skill", "POST /api/session/ses_1/prompt"])
+    expect(requests[1].body).toEqual({
+      id: "msg_1",
+      text: "/audit then /deploy",
+      skills: [{ id: "code-audit" }, { id: "deploy" }],
+      delivery: "steer",
+    })
+  })
+
+  test("names OpenCode does not list fall back to an instruction admitted before the prompt", async () => {
+    responses.push(json({ location: { directory: "/repo/app" }, data: [skillInfo("deploy")] }), json({ id: "syn_1" }), json({ id: "msg_1" }))
+    await opencodeClient.sendMessage({
+      id: "ses_1",
+      providerID: "openai",
+      text: "x",
+      messageId: "msg_1",
+      skills: { names: ["deploy", "ghost"], instructionFor },
+    })
+    expect(requests.map((r) => r.url.pathname)).toEqual(["/api/skill", "/api/session/ses_1/synthetic", "/api/session/ses_1/prompt"])
+    expect(requests[1].body).toMatchObject({ text: "use: ghost", resume: false })
+    expect(requests[2].body).toMatchObject({ skills: [{ id: "deploy" }] })
+  })
+
+  test("a failed skill list still sends, naming every skill in the instruction", async () => {
+    responses.push(json({ _tag: "UnknownError", message: "boom" }, 500), json({ id: "syn_1" }), json({ id: "msg_1" }))
+    await opencodeClient.sendMessage({
+      id: "ses_1",
+      providerID: "openai",
+      text: "x",
+      messageId: "msg_1",
+      skills: { names: ["deploy"], instructionFor },
+    })
+    expect(requests.map((r) => r.url.pathname)).toEqual(["/api/skill", "/api/session/ses_1/synthetic", "/api/session/ses_1/prompt"])
+    expect(requests[1].body).toMatchObject({ text: "use: deploy" })
+    const promptBody = requests[2].body
+    expect(typeof promptBody === "object" && promptBody !== null && "skills" in promptBody).toBe(false)
+  })
+
+  test("a skill removed before the prompt resends the same message with the instruction", async () => {
+    responses.push(
+      json({ location: { directory: "/repo/app" }, data: [skillInfo("deploy")] }),
+      json({ _tag: "InvalidRequestError", message: "Skill not found: deploy", field: "skills" }, 400),
+      json({ id: "syn_1" }),
+      json({ id: "msg_1" }),
+    )
+    const id = await opencodeClient.sendMessage({
+      id: "ses_1",
+      providerID: "openai",
+      text: "x",
+      messageId: "msg_1",
+      skills: { names: ["deploy"], instructionFor },
+    })
+    expect(id).toBe("msg_1")
+    expect(requests.map((r) => r.url.pathname)).toEqual([
+      "/api/skill",
+      "/api/session/ses_1/prompt",
+      "/api/session/ses_1/synthetic",
+      "/api/session/ses_1/prompt",
+    ])
+    expect(requests[1].body).toMatchObject({ id: "msg_1", skills: [{ id: "deploy" }] })
+    expect(requests[2].body).toMatchObject({ text: "use: deploy" })
+    expect(requests[3].body).toEqual({ id: "msg_1", text: "x" })
+  })
+
+  test("other prompt rejections are not retried", async () => {
+    responses.push(json({ location: { directory: "/repo/app" }, data: [skillInfo("deploy")] }), json({ _tag: "InvalidRequestError", message: "Attachment too big", field: "files" }, 400))
+    await expect(
+      opencodeClient.sendMessage({ id: "ses_1", providerID: "openai", text: "x", skills: { names: ["deploy"], instructionFor } }),
+    ).rejects.toThrow()
+    expect(requests.map((r) => r.url.pathname)).toEqual(["/api/skill", "/api/session/ses_1/prompt"])
   })
 })
 
@@ -454,6 +623,52 @@ describe("messages and config", () => {
     expect(catalog.providers).toEqual([{ id: "openai", name: "OpenAI" }])
     expect(catalog.models).toHaveLength(1)
     expect(catalog.default).toEqual({ id: "x", providerID: "openai" })
+  })
+
+  test("a fresh provider read waits out the one in flight and reads again", async () => {
+    const answer = (request: CapturedRequest) =>
+      request.url.pathname === "/api/provider"
+        ? json({ location: {}, data: [{ id: "openai", name: "OpenAI" }] })
+        : request.url.pathname === "/api/model"
+          ? json({ location: {}, data: [{ id: "openai/x", modelID: "x", providerID: "openai" }] })
+          : json({ location: {}, data: { id: "openai/x", modelID: "x", providerID: "openai" } })
+    responses.push(answer, answer, answer, answer, answer, answer)
+    const before = requests.length
+
+    const first = opencodeClient.getProvidersForConfig("/repo/app")
+    const joined = opencodeClient.getProvidersForConfig("/repo/app")
+    const fresh = opencodeClient.getProvidersForConfig("/repo/app", { fresh: true })
+    const [firstCatalog, joinedCatalog, freshCatalog] = await Promise.all([first, joined, fresh])
+
+    // One catalog read is three requests: the joined call adds none, the fresh one three more.
+    expect(requests.length - before).toBe(6)
+    expect(joinedCatalog).toBe(firstCatalog)
+    expect(freshCatalog).not.toBe(firstCatalog)
+  })
+})
+
+describe("providers of an isolated space", () => {
+  test("are the host's, asked with no directory, while models come from the space", async () => {
+    const space = "/spaces/a1b2c3d4e5f6/app"
+    const answer = (request: CapturedRequest) =>
+      request.url.pathname.endsWith("/provider")
+        ? json({ location: {}, data: [{ id: "anthropic", name: "Anthropic" }] })
+        : request.url.pathname.endsWith("/model")
+          ? json({ location: {}, data: [{ id: "anthropic/x", modelID: "x", providerID: "anthropic" }] })
+          : json({ location: {}, data: { id: "anthropic/x", modelID: "x", providerID: "anthropic" } })
+    responses.push(answer, answer, answer)
+    const before = requests.length
+    const catalog = await opencodeClient.getProvidersForConfig(space)
+    expect(catalog.providers).toEqual([{ id: "anthropic", name: "Anthropic" }])
+    const made = requests.slice(before)
+    const provider = made.find((request) => request.url.pathname.endsWith("/provider"))
+    const model = made.find((request) => request.url.pathname.endsWith("/model"))
+    // The host refuses its provider routes across the boundary, and a space directory without the
+    // prefix; the provider list names neither.
+    expect(provider?.url.pathname).toBe("/api/provider")
+    expect(provider?.headers.get("x-opencode-directory")).toBeNull()
+    expect(provider?.url.searchParams.get("directory")).toBeNull()
+    expect(model?.url.pathname.includes("/spaces/a1b2c3d4e5f6/") || model?.headers.get("x-opencode-directory") === encodeURIComponent(space)).toBe(true)
   })
 })
 
